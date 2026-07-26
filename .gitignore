@@ -11,6 +11,11 @@ build/
 .eggs/
 pip-wheel-metadata/
 
+# Office temp files (created while file is open)
+~$*.pptx
+~$*.docx
+~$*.xlsx
+
 # Virtual environments
 .venv/
 venv/
