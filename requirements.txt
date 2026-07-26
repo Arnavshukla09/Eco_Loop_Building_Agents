@@ -1,0 +1,31 @@
+# ── Honeywell Eco-Loop Building Agents — Python Dependencies ──────────────────
+# Install with: pip install -r requirements.txt
+
+# ── Web Framework ─────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+python-multipart>=0.0.9
+
+# ── MCP Server ────────────────────────────────────────────────────────────────
+fastmcp>=2.0.0
+
+# ── LLM / Ollama ─────────────────────────────────────────────────────────────
+ollama>=0.3.0
+
+# ── Data / Config ─────────────────────────────────────────────────────────────
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+numpy>=1.26.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+aiohttp>=3.9.0
+httpx>=0.27.0
+python-dotenv>=1.0.0
+rich>=13.7.0           # Beautiful console output for run.py
+tenacity>=8.3.0        # Retry logic for Ollama calls
+
+# ── NOTE: EnergyPlus Python API (pyenergyplus) ───────────────────────────────
+# pyenergyplus is BUNDLED with EnergyPlus — do NOT pip install it.
+# The code automatically adds the EnergyPlus install directory to sys.path.
+# If SIMULATION_MODE=True (default), EnergyPlus is not required.
