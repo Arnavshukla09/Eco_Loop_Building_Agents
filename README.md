@@ -7,6 +7,7 @@
 [![EnergyPlus](https://img.shields.io/badge/EnergyPlus-24.1-orange.svg)](https://energyplus.net/)
 [![LLM](https://img.shields.io/badge/LLM-Qwen2.5--7B-purple.svg)](https://ollama.com/)
 [![MCP](https://img.shields.io/badge/MCP-FastMCP-red.svg)](https://gofastmcp.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
