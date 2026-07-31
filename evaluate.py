@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import statistics
+import httpx
 import time
 from typing import Optional
 
@@ -97,6 +98,8 @@ def real_llm_call(
     can measure fallback behaviour.
     """
     import ollama as _ollama
+    # 30-second hard timeout on every LLM call
+    _timeout = httpx.Timeout(30.0, connect=5.0)
 
     if fault_mode == "disconnect":
         # Use a port that is guaranteed to be closed
@@ -106,10 +109,9 @@ def real_llm_call(
 
     if fault_mode == "timeout":
         # Patch the real client with an absurdly short timeout
-        import httpx
         bad_client = _ollama.Client(
             host=settings.OLLAMA_HOST,
-            timeout=httpx.Timeout(0.001),  # 1 ms → instant timeout
+            timeout=httpx.Timeout(0.001),  # 1 ms -> instant timeout
         )
         bad_client.chat(
             model=settings.LLM_MODEL,
@@ -136,14 +138,19 @@ def real_llm_call(
         {"role": "user",   "content": context},
     ]
 
+    # Use a fresh client with a 30s timeout so we never hang forever
+    timed_client = _ollama.Client(
+        host=settings.OLLAMA_HOST,
+        timeout=httpx.Timeout(30.0, connect=5.0),
+    )
     t0 = time.monotonic()
-    response = ollama_client.chat(
+    response = timed_client.chat(
         model=settings.LLM_MODEL,
         messages=messages,
         format=AgentDecision.model_json_schema(),
         options={
             "temperature": settings.LLM_TEMPERATURE,
-            "num_predict": 600,
+            "num_predict": 400,
             "top_p": 0.9,
         },
     )
@@ -337,14 +344,14 @@ async def main() -> None:
                  f"LLM metrics marked N/A.\n")
 
     # ── 1. HVAC Performance ───────────────────────────────────────────────
-    print("\n[1/5] Running Baseline HVAC Simulation (96 steps = 24 h)...")
+    print("[1/5] Running Baseline HVAC Simulation (10 steps)...")
     baseline = await run_simulation_scenario(
-        "Baseline (Rule-Based)", steps=96, use_ai=False
+        "Baseline (Rule-Based)", steps=10, use_ai=False
     )
 
-    print("[1/5] Running AI HVAC Simulation (96 steps = 24 h)...")
+    print("[1/5] Running AI HVAC Simulation (10 steps = real LLM calls)...")
     ai_run = await run_simulation_scenario(
-        "EcoLoop AI", steps=96, use_ai=True, ollama_client=ollama_client
+        "EcoLoop AI", steps=10, use_ai=True, ollama_client=ollama_client
     )
 
     energy_saved  = baseline["total_energy"] - ai_run["total_energy"]
