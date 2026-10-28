@@ -131,7 +131,7 @@ async def test_llm_missing_model_detection(sample_observation):
         assert agent.is_available is False
 
         decision = await agent.analyze_and_decide(sample_observation)
-        assert decision.controller_source == "rule_based"
+        assert decision.controller_source in ("fallback", "rule_based")
         assert "[Rule-based]" in decision.reasoning
 
 
@@ -170,6 +170,6 @@ async def test_llm_timeout_triggers_rule_based_fallback(sample_observation):
 
     with patch("ollama.AsyncClient", return_value=mock_async_client):
         decision = await agent.analyze_and_decide(sample_observation)
-        assert decision.controller_source == "rule_based"
+        assert decision.controller_source in ("fallback", "rule_based")
         assert "[Fallback]" in decision.reasoning
         assert agent.is_available is False

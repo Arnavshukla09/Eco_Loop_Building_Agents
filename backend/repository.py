@@ -106,8 +106,14 @@ class DatabaseRepository:
             )
             session.add(record)
 
-    async def record_decision(self, run_id: str, decision: AgentDecision, timestep: int) -> None:
-        """Persist an agent decision record for auditability."""
+    async def record_decision(
+        self,
+        run_id: str,
+        decision: AgentDecision,
+        timestep: int,
+        actuation_status: str = "applied",
+    ) -> None:
+        """Persist an agent decision record for auditability with verified actuation status."""
         setpoints_dict = {
             zone: {"cooling": sp.cooling, "heating": sp.heating}
             for zone, sp in decision.zone_setpoints.items()
@@ -123,6 +129,7 @@ class DatabaseRepository:
                 confidence=decision.confidence,
                 estimated_savings_pct=decision.estimated_savings_pct,
                 reasoning=decision.reasoning,
+                actuation_status=actuation_status,
                 zone_setpoints_json=json.dumps(setpoints_dict),
             )
             session.add(record)

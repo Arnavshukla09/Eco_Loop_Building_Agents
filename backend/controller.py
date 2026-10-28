@@ -24,6 +24,7 @@ from typing import Optional
 from backend.energyplus_runner import BuildingEnvironment, SimulatedBuildingEnvironment, create_environment
 from backend.llm_agent import agent
 from backend.models import AgentDecision, BuildingObservation, validate_setpoints
+from backend.providers import BaseDecisionProvider
 from backend.repository import repository
 from backend.state import state_store
 from config.settings import settings
@@ -40,9 +41,10 @@ class AutonomousController:
     env :   The active BuildingEnvironment (simulated or real EnergyPlus).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, provider: Optional[BaseDecisionProvider] = None) -> None:
         self.env: Optional[BuildingEnvironment] = None
         self.baseline_env: Optional[BuildingEnvironment] = None
+        self.provider: BaseDecisionProvider = provider or agent
         self._running   = False
         self._sim_task:   Optional[asyncio.Task] = None
         self._agent_task: Optional[asyncio.Task] = None
@@ -253,8 +255,8 @@ class AutonomousController:
                     obs.occupancy * 100,
                 )
 
-                # Ask LLM for a decision
-                decision: AgentDecision = await agent.analyze_and_decide(obs, history)
+                # Query configured provider (Ollama, RuleBased, or Hybrid) via BaseDecisionProvider contract
+                decision: AgentDecision = await self.provider.decide(obs, history)
 
                 # Apply setpoints to environment
                 await self._apply_decision(decision)
@@ -360,12 +362,13 @@ class AutonomousController:
                         state_store.update_setpoint(zone, sp.cooling, sp.heating)
                         applied += 1
 
+        actuation_status = "applied" if applied == len(decision.zone_setpoints) else ("partial" if applied > 0 else "failed")
         if self._current_run_id:
             obs = state_store.get_observation()
             timestep = obs.timestep if obs else 0
             try:
                 asyncio.create_task(
-                    repository.record_decision(self._current_run_id, decision, timestep)
+                    repository.record_decision(self._current_run_id, decision, timestep, actuation_status)
                 )
             except Exception:
                 pass

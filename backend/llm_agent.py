@@ -27,6 +27,7 @@ import time
 from typing import Dict, List, Optional
 
 from backend.models import AgentDecision, BuildingObservation, HistoryEntry, ZoneSetpoint
+from backend.providers import BaseDecisionProvider
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -145,9 +146,10 @@ def _rule_based_decision(obs: BuildingObservation) -> AgentDecision:
 
 # ── Agent class ───────────────────────────────────────────────────────────────
 
-class BuildingAIAgent:
+class BuildingAIAgent(BaseDecisionProvider):
     """
     AI agent that queries a local Ollama LLM asynchronously and returns structured HVAC decisions.
+    Implements the BaseDecisionProvider contract.
     """
 
     def __init__(self) -> None:
@@ -161,6 +163,17 @@ class BuildingAIAgent:
         self._last_health_check_time: float = 0.0
 
         self._initialise_client()
+
+    @property
+    def name(self) -> str:
+        return f"ollama_{self._model}"
+
+    async def decide(
+        self,
+        obs: BuildingObservation,
+        history: Optional[List[HistoryEntry]] = None,
+    ) -> AgentDecision:
+        return await self.analyze_and_decide(obs, history)
 
     def _initialise_client(self) -> None:
         try:
@@ -318,7 +331,7 @@ class BuildingAIAgent:
             logger.warning("LLM decision error: %s — using rule-based fallback.", exc)
 
         fallback = _rule_based_decision(obs)
-        fallback.controller_source = "rule_based"
+        fallback.controller_source = "fallback"
         fallback.reasoning = "[Fallback] " + fallback.reasoning
         return fallback
 

@@ -222,14 +222,27 @@ async def get_status() -> JSONResponse:
 async def get_history(limit: int = 100) -> JSONResponse:
     """Return historical data points for chart initialisation, querying database if memory is cold."""
     limit = max(1, min(limit, settings.HISTORY_MAX_LEN))
-    entries = state_store.get_history(limit=limit)
-    if len(entries) < limit:
+    mem_entries = state_store.get_history(limit=limit)
+    if len(mem_entries) < limit:
         try:
             db_entries = await repository.get_history(limit=limit)
-            if len(db_entries) > len(entries):
-                entries = db_entries
+            if db_entries:
+                # Merge and deduplicate by simulation timestamp
+                seen = set()
+                merged = []
+                for e in db_entries + mem_entries:
+                    key = e.sim_time.isoformat()
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(e)
+                entries = merged[-limit:]
+            else:
+                entries = mem_entries
         except Exception as exc:
             logger.debug("Database history lookup bypassed: %s", exc)
+            entries = mem_entries
+    else:
+        entries = mem_entries
     return JSONResponse(content={"entries": [e.model_dump(mode="json") for e in entries]})
 
 

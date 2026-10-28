@@ -79,6 +79,7 @@ class DecisionRecordModel(Base):
     confidence = Column(Float, nullable=False)
     estimated_savings_pct = Column(Float, nullable=False)
     reasoning = Column(Text, nullable=False)
+    actuation_status = Column(String(32), default="applied", nullable=False)
     zone_setpoints_json = Column(Text, nullable=False)
 
     run = relationship("SimulationRunModel", back_populates="decisions")
