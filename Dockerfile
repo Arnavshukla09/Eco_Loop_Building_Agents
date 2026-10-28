@@ -1,11 +1,21 @@
-# Dockerfile
-# Multi-stage build for the Eco-Loop backend
-FROM python:3.11-slim
+# ── Stage 1: Build React Frontend ──────────────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: Python Backend Runtime ───────────────────────────────────────────
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
@@ -20,8 +30,8 @@ COPY config/ ./config/
 COPY energyplus/ ./energyplus/
 COPY run.py .
 
-# Copy built frontend (if exists)
-COPY frontend/dist/ ./frontend/dist/ 2>/dev/null || true
+# Copy compiled frontend from Stage 1
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Create logs directory
 RUN mkdir -p logs

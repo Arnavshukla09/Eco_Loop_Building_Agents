@@ -21,6 +21,7 @@ Mounts
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import time
 from pathlib import Path
@@ -45,6 +46,50 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── FastMCP ASGI application ──────────────────────────────────────────────────
+# In FastMCP 3.x, http_app(path="/") serves the MCP endpoint directly at root of mount
+mcp_asgi_app = mcp.http_app(path="/")
+
+# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
+_broadcast_task: asyncio.Task | None = None
+_app_start_time = time.monotonic()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _broadcast_task
+    logger.info("=" * 60)
+    logger.info("  Honeywell Eco-Loop Building Agent  v1.0.0")
+    logger.info("  Dashboard  → http://localhost:%d", settings.API_PORT)
+    logger.info("  API docs   → http://localhost:%d/docs", settings.API_PORT)
+    logger.info("  MCP tools  → http://localhost:%d/mcp/", settings.API_PORT)
+    logger.info("=" * 60)
+
+    # FastMCP lifespan provides taskgroup execution for MCP clients
+    async with mcp_asgi_app.lifespan(app):
+        # Start the autonomous controller (simulation + AI agent)
+        await controller.start()
+
+        # Start WebSocket broadcast loop
+        _broadcast_task = asyncio.create_task(broadcast_loop(), name="ws-broadcast")
+
+        state_store.set_mcp_running(True)
+        logger.info("All systems running.")
+
+        try:
+            yield
+        finally:
+            if _broadcast_task and not _broadcast_task.done():
+                _broadcast_task.cancel()
+                try:
+                    await _broadcast_task
+                except asyncio.CancelledError:
+                    pass
+            await controller.stop()
+            state_store.set_mcp_running(False)
+            logger.info("Eco-Loop shut down cleanly.")
+
+
 # ── FastAPI application ───────────────────────────────────────────────────────
 app = FastAPI(
     title="Honeywell Eco-Loop Building Agent",
@@ -55,64 +100,22 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
+# Browser CORS spec: cannot use allow_credentials=True with allow_origins=["*"]
+allow_creds = False if "*" in settings.CORS_ORIGINS else True
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=allow_creds,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── Mount MCP server ──────────────────────────────────────────────────────────
-# FastMCP 3.x uses http_app(); FastMCP 2.x used sse_app().
-# Mounted at /mcp — tools accessible at /mcp/sse or /mcp/
-try:
-    if hasattr(mcp, "http_app"):
-        app.mount("/mcp", mcp.http_app())
-        logger.info("FastMCP 3.x server mounted at /mcp (HTTP)")
-    elif hasattr(mcp, "sse_app"):
-        app.mount("/mcp", mcp.sse_app())
-        logger.info("FastMCP 2.x server mounted at /mcp/sse")
-    else:
-        logger.warning("FastMCP mount method not found. MCP tools available via shared state.")
-except Exception as exc:
-    logger.warning("Could not mount MCP app: %s. MCP tools still available via state.", exc)
-
-# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
-_broadcast_task: asyncio.Task | None = None
-_app_start_time = time.monotonic()
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    global _broadcast_task
-    logger.info("=" * 60)
-    logger.info("  Honeywell Eco-Loop Building Agent  v1.0.0")
-    logger.info("  Dashboard  → http://localhost:%d", settings.API_PORT)
-    logger.info("  API docs   → http://localhost:%d/docs", settings.API_PORT)
-    logger.info("  MCP tools  → http://localhost:%d/mcp/sse", settings.API_PORT)
-    logger.info("=" * 60)
-
-    # Start the autonomous controller (simulation + AI agent)
-    await controller.start()
-
-    # Start WebSocket broadcast loop
-    _broadcast_task = asyncio.create_task(broadcast_loop(), name="ws-broadcast")
-
-    state_store.set_mcp_running(True)
-    logger.info("All systems running.")
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    global _broadcast_task
-    if _broadcast_task and not _broadcast_task.done():
-        _broadcast_task.cancel()
-    await controller.stop()
-    logger.info("Eco-Loop shut down cleanly.")
+# Mount MCP ASGI sub-application at /mcp
+app.mount("/mcp", mcp_asgi_app)
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -158,26 +161,37 @@ async def health_check() -> HealthStatus:
 
 @app.post("/api/setpoint")
 async def manual_setpoint(cmd: SetpointCommand) -> JSONResponse:
-    """Manual setpoint override.  Bypasses AI for immediate effect."""
+    """Manual setpoint override. Validates safety constraints and applies setpoints."""
+    if controller is None or controller.env is None:
+        raise HTTPException(status_code=503, detail="Simulation environment not initialised.")
+
+    # Clamp setpoints to allowable ranges and enforce minimum deadband
+    cooling_c = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cmd.cooling))
+    heating_c = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, cmd.heating))
+    if cooling_c < heating_c + 1.5:
+        cooling_c = heating_c + 2.0
+
     if cmd.zone is not None:
         if cmd.zone not in settings.ZONES:
             raise HTTPException(
                 status_code=422,
                 detail=f"Unknown zone '{cmd.zone}'. Valid: {settings.ZONES}",
             )
-        ok = await controller.env.set_setpoint(cmd.zone, cmd.cooling, cmd.heating)
+        ok = await controller.env.set_setpoint(cmd.zone, cooling_c, heating_c)
         message = f"Setpoint applied to {cmd.zone}." if ok else "Failed to apply setpoint."
+        zone_applied = cmd.zone
     else:
-        await controller.env.set_all_setpoints(cmd.cooling, cmd.heating)
+        await controller.env.set_all_setpoints(cooling_c, heating_c)
         ok = True
         message = "Setpoints applied to all zones."
+        zone_applied = "ALL"
 
     return JSONResponse(
         content={
             "success": ok,
-            "zone": cmd.zone or "ALL",
-            "cooling_c": cmd.cooling,
-            "heating_c": cmd.heating,
+            "zone": zone_applied,
+            "cooling_c": round(cooling_c, 1),
+            "heating_c": round(heating_c, 1),
             "message": message,
         }
     )
@@ -185,10 +199,17 @@ async def manual_setpoint(cmd: SetpointCommand) -> JSONResponse:
 
 @app.post("/api/simulation/speed")
 async def set_speed(speedup: float) -> JSONResponse:
-    """Adjust simulation speedup factor (1 = real time, 60 = 1 simulated hour per second)."""
-    speedup = max(1.0, min(3600.0, speedup))
+    """
+    Adjust simulation speedup factor (demo/local control).
+    1.0 = real time, 60.0 = 1 simulated minute per second, max 3600.0.
+    """
+    if speedup < 1.0 or speedup > 3600.0:
+        raise HTTPException(
+            status_code=422,
+            detail="Speedup factor must be between 1.0 and 3600.0.",
+        )
     settings.SPEEDUP_FACTOR = speedup
-    return JSONResponse(content={"speedup_factor": speedup})
+    return JSONResponse(content={"speedup_factor": speedup, "message": "Simulation speed updated."})
 
 
 @app.get("/api/mcp/tools")
@@ -212,6 +233,10 @@ async def list_mcp_tools() -> JSONResponse:
             "description": "Apply same setpoints to all zones.",
         },
         {
+            "name": "run_simulation_step",
+            "description": "Advance the building simulation environment by one timestep.",
+        },
+        {
             "name": "get_energy_usage",
             "description": "Energy consumption metrics.",
         },
@@ -232,7 +257,7 @@ async def list_mcp_tools() -> JSONResponse:
             "description": "Last AI agent decision and reasoning.",
         },
     ]
-    return JSONResponse(content={"tools": tools, "mcp_endpoint": "/mcp/sse"})
+    return JSONResponse(content={"tools": tools, "mcp_endpoint": "/mcp/"})
 
 
 # ── Serve React frontend ──────────────────────────────────────────────────────

@@ -1,6 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-export function useWebSocket(url = 'ws://localhost:8000/ws') {
+function getDefaultWebSocketUrl() {
+  if (typeof window === 'undefined') return 'ws://localhost:8000/ws';
+  if (import.meta.env?.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // If running on Vite dev server (port 5173), connect to default backend port 8000
+  if (window.location.port === '5173') {
+    return `${protocol}//${window.location.hostname}:8000/ws`;
+  }
+  return `${protocol}//${window.location.host}/ws`;
+}
+
+export function useWebSocket(url) {
+  const targetUrl = url || getDefaultWebSocketUrl();
   const [data, setData] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
@@ -9,13 +21,21 @@ export function useWebSocket(url = 'ws://localhost:8000/ws') {
   const ws = useRef(null);
   const reconnectTimeout = useRef(null);
   const pingInterval = useRef(null);
+  const reconnectCountRef = useRef(0);
+  const isUnmounted = useRef(false);
 
   const connect = useCallback(() => {
+    if (isUnmounted.current) return;
     try {
-      ws.current = new WebSocket(url);
+      if (ws.current && (ws.current.readyState === WebSocket.CONNECTING || ws.current.readyState === WebSocket.OPEN)) {
+        return;
+      }
+      ws.current = new WebSocket(targetUrl);
 
       ws.current.onopen = () => {
+        if (isUnmounted.current) return;
         setIsConnected(true);
+        reconnectCountRef.current = 0;
         setReconnectCount(0);
         
         // Setup ping interval (20s)
@@ -28,6 +48,7 @@ export function useWebSocket(url = 'ws://localhost:8000/ws') {
       };
 
       ws.current.onmessage = (event) => {
+        if (isUnmounted.current) return;
         try {
           const parsed = JSON.parse(event.data);
           if (parsed.type === 'state_update') {
@@ -40,14 +61,19 @@ export function useWebSocket(url = 'ws://localhost:8000/ws') {
       };
 
       ws.current.onclose = () => {
+        if (isUnmounted.current) return;
         setIsConnected(false);
         if (pingInterval.current) clearInterval(pingInterval.current);
         
-        // Reconnect with exponential backoff
-        const timeout = Math.min(1000 * Math.pow(2, reconnectCount), 30000);
+        // Reconnect with exponential backoff without recreating callback
+        const count = reconnectCountRef.current;
+        const timeout = Math.min(1000 * Math.pow(2, count), 30000);
         reconnectTimeout.current = setTimeout(() => {
-          setReconnectCount(c => c + 1);
-          connect();
+          if (!isUnmounted.current) {
+            reconnectCountRef.current += 1;
+            setReconnectCount(reconnectCountRef.current);
+            connect();
+          }
         }, timeout);
       };
 
@@ -58,12 +84,14 @@ export function useWebSocket(url = 'ws://localhost:8000/ws') {
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
     }
-  }, [url, reconnectCount]);
+  }, [targetUrl]);
 
   useEffect(() => {
+    isUnmounted.current = false;
     connect();
     
     return () => {
+      isUnmounted.current = true;
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
       if (pingInterval.current) clearInterval(pingInterval.current);
       if (ws.current) {

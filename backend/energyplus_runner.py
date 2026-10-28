@@ -32,7 +32,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -105,10 +105,12 @@ class WeatherModel:
         latitude: float = settings.LOCATION_LATITUDE,
         annual_mean_c: float = 10.0,
         annual_amplitude_c: float = 12.0,
+        seed: Optional[int] = None,
     ) -> None:
         self.latitude = latitude
         self.annual_mean_c = annual_mean_c
         self.annual_amplitude_c = annual_amplitude_c
+        self._rng = random.Random(seed) if seed is not None else random.Random()
 
     def get_conditions(self, dt: datetime) -> tuple[float, float]:
         """Return (outdoor_temp_°C, relative_humidity_%)."""
@@ -120,10 +122,10 @@ class WeatherModel:
         # Diurnal: peaks at ~15:00
         hour_frac = dt.hour + dt.minute / 60.0
         diurnal = 5.0 * math.sin(2 * math.pi * (hour_frac - 6.0) / 24.0)
-        temp = self.annual_mean_c + seasonal + diurnal + random.gauss(0, 0.3)
+        temp = self.annual_mean_c + seasonal + diurnal + self._rng.gauss(0, 0.3)
 
         # Humidity roughly anti-correlated with temperature
-        humidity = 65.0 - seasonal * 0.8 + random.gauss(0, 3.0)
+        humidity = 65.0 - seasonal * 0.8 + self._rng.gauss(0, 3.0)
         humidity = max(20.0, min(95.0, humidity))
         return temp, humidity
 
@@ -190,45 +192,44 @@ def _pmv_ppd(air_temp: float, humidity: float, met: float = 1.1, clo: float = 0.
 
     M    = met * 58.15        # Metabolic rate W/m²
     W    = 0.0                # External mechanical work
+    H    = M - W              # Internal heat production
     Icl  = clo * 0.155        # Clothing thermal resistance m²K/W
 
     # Clothing area factor (ISO 7730 Table C.1)
     fcl  = 1.00 + 1.29 * Icl if Icl < 0.078 else 1.05 + 0.645 * Icl
 
-    # Solve for clothing surface temp tcl by Newton iteration
-    # Heat balance: fcl*hc*(tcl-ta) + 3.96e-8*fcl*((tcl+273)^4-(tr+273)^4) = M-W-Qres-Qdiff
-    # where Qres and Qdiff are respiratory and diffusive losses
+    # Mean skin temperature (°C)
+    tsk  = 35.7 - 0.028 * H
 
-    # Respiratory losses
-    Qres = 0.0014 * M * (34.0 - ta) + 1.7e-5 * M * (5867.0 - pa)
-    # Skin diffusion loss
+    # Evaporative & respiratory losses (W/m²)
+    Qres  = 0.0014 * M * (34.0 - ta) + 1.7e-5 * M * (5867.0 - pa)
     Qdiff = 3.05e-3 * (5733.0 - 6.99 * M - pa)
-    # Regulatory sweat
-    Qsw  = 0.42 * (M - W - 58.15)
+    Qsw   = 0.42 * (H - 58.15) if H > 58.15 else 0.0
 
-    # Heat that must be lost via clothing (W/m²)
-    Q_clothing = M - W - Qres - Qdiff - Qsw
+    # Initial guess for clothing surface temperature tcl
+    tcl = ta + (tsk - ta) / (1.0 + 1.7 * Icl)
 
-    # Initial guess for tcl
-    tcl = ta + Q_clothing * Icl / fcl
-
-    # Newton iteration (5 steps sufficient)
-    for _ in range(5):
+    # Newton iteration to solve heat balance at clothing outer surface:
+    # heat conducted through clothing = radiative + convective surface losses
+    for _ in range(10):
         hc = max(2.38 * abs(tcl - ta) ** 0.25, 12.1 * math.sqrt(va))
-        f  = (fcl * hc * (tcl - ta)
-              + 3.96e-8 * fcl * ((tcl + 273.0) ** 4 - (tr + 273.0) ** 4)
-              - Q_clothing)
-        df = (fcl * hc
-              + 3.96e-8 * fcl * 4 * (tcl + 273.0) ** 3)
+        rad = 3.96e-8 * fcl * ((tcl + 273.0) ** 4 - (tr + 273.0) ** 4)
+        conv = fcl * hc * (tcl - ta)
+        if Icl <= 0:
+            tcl = tsk
+            break
+        cond = (tsk - tcl) / Icl
+        f = cond - (rad + conv)
+        df = -1.0 / Icl - (3.96e-8 * fcl * 4.0 * (tcl + 273.0) ** 3 + fcl * hc)
         tcl -= f / df
 
-    tcl  = max(ta - 5.0, min(ta + 15.0, tcl))
+    tcl  = max(ta - 10.0, min(ta + 25.0, tcl))
     hc   = max(2.38 * abs(tcl - ta) ** 0.25, 12.1 * math.sqrt(va))
+    rad  = 3.96e-8 * fcl * ((tcl + 273.0) ** 4 - (tr + 273.0) ** 4)
+    conv = fcl * hc * (tcl - ta)
 
-    # Operative heat load L (W/m²)
-    L = (Q_clothing
-         - fcl * hc * (tcl - ta)
-         - 3.96e-8 * fcl * ((tcl + 273.0) ** 4 - (tr + 273.0) ** 4))
+    # Thermal load L on the body = internal heat - total heat dissipation
+    L = H - (rad + conv + Qdiff + Qsw + Qres)
 
     pmv = (0.303 * math.exp(-0.036 * M) + 0.028) * L
     pmv = max(-3.0, min(3.0, pmv))
@@ -276,23 +277,32 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
     # ── Simulation start (January 1, 08:00) ─────────────────────────────────
     _SIM_START = datetime(2024, 1, 1, 8, 0, 0)
 
-    def __init__(self) -> None:
-        self._weather   = WeatherModel()
+    def __init__(self, is_baseline: bool = False, seed: Optional[int] = None) -> None:
+        self._rng       = random.Random(seed) if seed is not None else random.Random()
+        self._is_baseline = is_baseline
+        self._weather   = WeatherModel(seed=seed)
         self._occupancy = OccupancySchedule()
         self._ts_min    = settings.TIMESTEP_MINUTES
         self._dt_s      = self._ts_min * 60.0          # timestep seconds
 
         # State
         self._sim_dt    = self._SIM_START
-        self._temps     = {z: 21.0 + random.uniform(-0.5, 0.5) for z in ZONES}
-        self._sp_cool   = {z: settings.COOLING_SETPOINT_DEFAULT for z in ZONES}
-        self._sp_heat   = {z: settings.HEATING_SETPOINT_DEFAULT for z in ZONES}
+        cool_init = settings.BASELINE_SETPOINT_COOLING if is_baseline else settings.COOLING_SETPOINT_DEFAULT
+        heat_init = settings.BASELINE_SETPOINT_HEATING if is_baseline else settings.HEATING_SETPOINT_DEFAULT
+
+        self._temps     = {z: 21.0 + self._rng.uniform(-0.5, 0.5) for z in ZONES}
+        self._sp_cool   = {z: cool_init for z in ZONES}
+        self._sp_heat   = {z: heat_init for z in ZONES}
         self._energy    = 0.0                           # cumulative kWh
         self._step_n    = 0
         self._lock      = threading.RLock()
         self._ready     = True
 
-        logger.info("SimulatedBuildingEnvironment initialised (timestep=%d min).", self._ts_min)
+        logger.info(
+            "SimulatedBuildingEnvironment initialised (timestep=%d min, baseline=%s).",
+            self._ts_min,
+            self._is_baseline,
+        )
 
     @property
     def name(self) -> str:
@@ -351,10 +361,10 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
             # ── Thermal mass update ──────────────────────────────────────────
             Q_total = Q_solar + Q_internal + Q_env + Q_hvac
             dT      = Q_total * self._dt_s / THERMAL_MASS[zone]
-            self._temps[zone] = round(temp + dT + random.gauss(0, 0.02), 4)
+            self._temps[zone] = round(temp + dT + self._rng.gauss(0, 0.02), 4)
 
             # ── Zone humidity (simplified) ───────────────────────────────────
-            zone_hum = outdoor_hum * 0.75 + random.gauss(0, 1.5)
+            zone_hum = outdoor_hum * 0.75 + self._rng.gauss(0, 1.5)
             zone_hum = max(20.0, min(70.0, zone_hum))
 
             pmv, ppd = _pmv_ppd(self._temps[zone], zone_hum, met=1.1, clo=0.7)
@@ -372,7 +382,7 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
         # Cumulative energy
         step_kwh           = hvac_total_kw * (self._ts_min / 60.0)
         self._energy       += step_kwh
-        wall_time           = datetime.utcnow()
+        wall_time           = datetime.now(timezone.utc)
         sim_time            = self._sim_dt
         self._sim_dt       += timedelta(minutes=self._ts_min)
         self._step_n       += 1
@@ -390,12 +400,15 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
         )
 
     async def set_setpoint(self, zone: str, cooling: float, heating: float) -> bool:
+        if self._is_baseline:
+            logger.debug("Setpoint change rejected: environment is running fixed baseline.")
+            return False
         if zone not in ZONES:
             logger.warning("Unknown zone: %s", zone)
             return False
         cooling = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cooling))
         heating = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, heating))
-        if cooling <= heating:
+        if cooling < heating + 1.5:
             cooling = heating + 2.0
         with self._lock:
             self._sp_cool[zone] = cooling
@@ -555,7 +568,7 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
 
         self._step_n += 1
         obs = BuildingObservation(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             simulation_time=sim_dt,
             zones=zones,
             outdoor_temp=api.exchange.get_variable_value(state, self._outdoor_temp_handle),

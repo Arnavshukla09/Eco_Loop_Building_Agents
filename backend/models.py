@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator, computed_field
+from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
 
 # ── Zone-level state ──────────────────────────────────────────────────────────
 
@@ -83,13 +83,11 @@ class ZoneSetpoint(BaseModel):
     cooling: float = Field(..., ge=18.0, le=32.0, description="Cooling setpoint (°C)")
     heating: float = Field(..., ge=10.0, le=25.0, description="Heating setpoint (°C)")
 
-    @field_validator("cooling")
-    @classmethod
-    def cooling_above_heating(cls, v: float, info) -> float:
-        heating = info.data.get("heating")
-        if heating is not None and v <= heating:
-            raise ValueError(f"Cooling setpoint ({v}) must be above heating setpoint ({heating})")
-        return v
+    @model_validator(mode="after")
+    def validate_deadband(self) -> "ZoneSetpoint":
+        if self.cooling <= self.heating:
+            raise ValueError(f"Cooling setpoint ({self.cooling}°C) must be above heating setpoint ({self.heating}°C)")
+        return self
 
 
 class AgentDecision(BaseModel):
@@ -135,12 +133,16 @@ class MetricsSummary(BaseModel):
         ..., description="Cumulative energy savings vs baseline (%)."
     )
     baseline_energy_kwh: float = Field(
-        ..., description="Projected baseline energy usage (kWh)."
+        ..., description="Baseline energy usage (kWh)."
     )
     current_energy_kwh: float = Field(..., description="Actual cumulative energy (kWh).")
     co2_saved_kg: float = Field(..., description="Estimated CO₂ avoided (kg).")
     peak_demand_kw: float = Field(default=0.0)
     avg_temp_c: float = Field(default=21.0)
+    baseline_mode: str = Field(
+        default="measured",
+        description="Whether baseline is 'measured' via fixed setpoint reference or 'estimated'.",
+    )
 
 
 # ── WebSocket / API payloads ──────────────────────────────────────────────────
@@ -178,8 +180,16 @@ class SetpointCommand(BaseModel):
         default=None,
         description="Zone to update (None = apply to all zones).",
     )
-    cooling: float = Field(..., ge=18.0, le=32.0)
-    heating: float = Field(..., ge=10.0, le=25.0)
+    cooling: float = Field(..., ge=18.0, le=32.0, description="Cooling setpoint (°C)")
+    heating: float = Field(..., ge=10.0, le=25.0, description="Heating setpoint (°C)")
+
+    @model_validator(mode="after")
+    def validate_deadband(self) -> "SetpointCommand":
+        if self.cooling < self.heating + 1.5:
+            raise ValueError(
+                f"Cooling setpoint ({self.cooling}°C) must be at least 1.5°C above heating setpoint ({self.heating}°C)"
+            )
+        return self
 
 
 class HealthStatus(BaseModel):

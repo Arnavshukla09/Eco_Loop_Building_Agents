@@ -52,7 +52,7 @@ export default function App() {
       <div className="min-h-screen bg-brand-navy flex flex-col items-center justify-center text-white">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-orange mb-4"></div>
         <h2 className="text-xl font-semibold">Connecting to Building Agent...</h2>
-        <p className="text-gray-500 mt-2">Waiting for WebSocket data on ws://localhost:8000/ws</p>
+        <p className="text-gray-500 mt-2">Waiting for live building telemetry...</p>
       </div>
     );
   }

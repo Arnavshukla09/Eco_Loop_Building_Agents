@@ -249,7 +249,7 @@ app.mount("/mcp", mcp.http_app())
 
 **MCP tools in Eco-Loop (10 total):**
 `read_building_state`, `get_hvac_setpoints`, `update_setpoint`,
-`update_all_setpoints`, `get_energy_usage`, `calculate_savings`,
+`update_all_setpoints`, `run_simulation_step`, `get_energy_usage`, `calculate_savings`,
 `get_comfort_report`, `get_outdoor_conditions`, `get_ai_decision`
 
 **Study resource:** https://modelcontextprotocol.io | https://gofastmcp.com

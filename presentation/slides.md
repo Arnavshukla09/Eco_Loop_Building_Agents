@@ -113,6 +113,7 @@ React Dashboard
 | `get_hvac_setpoints` | Current thermostat values |
 | `update_setpoint` | Change a zone's setpoints |
 | `update_all_setpoints` | Global setpoint change |
+| `run_simulation_step` | Step physics simulation |
 | `get_energy_usage` | kWh + peak demand |
 | `calculate_savings` | AI savings vs baseline |
 | `get_comfort_report` | PMV/PPD per zone |
@@ -209,7 +210,7 @@ class BuildingEnvironment(ABC):
 2. **Point to AI Decision panel** → "Notice the LLM reasoning updates every 30s"
 3. **Show occupancy drop** → "It's now noon — occupancy drops, AI widens deadband"
 4. **Show savings counter** → "16.9% savings vs fixed-setpoint baseline"
-5. **Call MCP tool directly** → `curl http://localhost:8000/mcp/sse` + `read_building_state`
+5. **Call MCP tool directly** → `http://localhost:8000/mcp/` or `/api/mcp/tools`
 6. **Manual override** → POST `/api/setpoint` → dashboard updates live
 7. **API docs** → Show Swagger at `/docs`
 

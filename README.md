@@ -154,7 +154,7 @@ This will:
 
 **Dashboard:** http://localhost:8000  
 **API docs:** http://localhost:8000/docs  
-**MCP tools:** http://localhost:8000/mcp/sse
+**MCP tools:** http://localhost:8000/mcp/
 
 ### Frontend Development Mode
 
@@ -183,14 +183,14 @@ Edit `.env` to customise:
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `LLM_MODEL` | `qwen2.5:7b` | Model to use (also supports `llama3:8b`) |
 | `AGENT_INTERVAL_SECONDS` | `30` | How often AI makes a decision |
-| `SPEEDUP_FACTOR` | `60` | Sim speed (60 = 1 hr simulated per second) |
+| `SPEEDUP_FACTOR` | `60` | Sim speedup (60x: 15s wall-clock per 15-min simulated step) |
 | `API_PORT` | `8000` | Dashboard port |
 
 ---
 
 ## MCP Tools
 
-The MCP server exposes **10 tools** accessible at `/mcp/sse`:
+The MCP server exposes **10 tools** accessible at `/mcp/`:
 
 | Tool | Description |
 |---|---|
@@ -198,6 +198,7 @@ The MCP server exposes **10 tools** accessible at `/mcp/sse`:
 | `get_hvac_setpoints` | Current setpoints per zone |
 | `update_setpoint` | Change one zone's setpoints |
 | `update_all_setpoints` | Change all zones at once |
+| `run_simulation_step` | Advance physics simulation one timestep |
 | `get_energy_usage` | Cumulative kWh + peak demand |
 | `calculate_savings` | Savings vs baseline (kWh, %, CO₂) |
 | `get_comfort_report` | PMV/PPD per zone + ASHRAE 55 compliance |

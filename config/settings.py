@@ -60,8 +60,9 @@ class Settings(BaseSettings):
     SPEEDUP_FACTOR: float = Field(
         default=60.0,
         description=(
-            "Wall-clock seconds per simulated minute.  "
-            "Default (60) means 1 simulated hour takes 1 wall-clock second."
+            "Simulation speedup factor (ratio of simulated seconds to wall-clock seconds). "
+            "Default (60.0) means 1 wall-clock second represents 60 simulated seconds "
+            "(1 simulated minute), so a 15-minute timestep takes 15.0 wall-clock seconds."
         ),
     )
 

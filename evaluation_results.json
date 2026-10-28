@@ -1,0 +1,104 @@
+{
+  "timestamp": "2026-10-28T14:05:44.253865+00:00",
+  "configuration": {
+    "steps": 96,
+    "seeds": [
+      42,
+      101,
+      2024
+    ],
+    "ollama_available": false,
+    "model": "qwen2.5:7b",
+    "co2_factor_kg_per_kwh": 0.386,
+    "baseline_setpoint_cooling": 22.0,
+    "baseline_setpoint_heating": 21.0
+  },
+  "aggregate_metrics": {
+    "mean_baseline_kwh": 142.39,
+    "mean_controlled_kwh": 77.43,
+    "mean_savings_pct": 45.62,
+    "std_savings_pct": 0.45,
+    "mean_peak_reduction_pct": 8.87
+  },
+  "runs": [
+    {
+      "seed": 42,
+      "baseline_kwh": 141.0,
+      "controlled_kwh": 76.57,
+      "savings_pct": 45.69,
+      "peak_reduction_pct": 13.48,
+      "mean_pmv": -0.09,
+      "comfort_adherence_pct": 63.1
+    },
+    {
+      "seed": 101,
+      "baseline_kwh": 142.71,
+      "controlled_kwh": 78.29,
+      "savings_pct": 45.14,
+      "peak_reduction_pct": 11.08,
+      "mean_pmv": -0.095,
+      "comfort_adherence_pct": 65.6
+    },
+    {
+      "seed": 2024,
+      "baseline_kwh": 143.46,
+      "controlled_kwh": 77.43,
+      "savings_pct": 46.03,
+      "peak_reduction_pct": 2.05,
+      "mean_pmv": -0.064,
+      "comfort_adherence_pct": 62.9
+    }
+  ],
+  "mcp_tools": [
+    {
+      "name": "read_building_state",
+      "time_ms": 0.011,
+      "status": "Success"
+    },
+    {
+      "name": "get_hvac_setpoints",
+      "time_ms": 0.0228,
+      "status": "Success"
+    },
+    {
+      "name": "update_setpoint",
+      "time_ms": 0.006,
+      "status": "Success"
+    },
+    {
+      "name": "update_all_setpoints",
+      "time_ms": 0.0028,
+      "status": "Success"
+    },
+    {
+      "name": "run_simulation_step",
+      "time_ms": 0.0017,
+      "status": "Success"
+    },
+    {
+      "name": "get_energy_usage",
+      "time_ms": 0.0208,
+      "status": "Success"
+    },
+    {
+      "name": "calculate_savings",
+      "time_ms": 0.018,
+      "status": "Success"
+    },
+    {
+      "name": "get_comfort_report",
+      "time_ms": 0.0155,
+      "status": "Success"
+    },
+    {
+      "name": "get_outdoor_conditions",
+      "time_ms": 0.0098,
+      "status": "Success"
+    },
+    {
+      "name": "get_ai_decision",
+      "time_ms": 0.0024,
+      "status": "Success"
+    }
+  ]
+}

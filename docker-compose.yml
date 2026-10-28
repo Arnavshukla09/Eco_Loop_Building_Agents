@@ -1,12 +1,10 @@
-version: "3.9"
-
 # ── Honeywell Eco-Loop — Docker Compose ──────────────────────────────────────
 # Starts all services in containers.
 #
 # Usage:
-#   docker-compose up --build
-#   docker-compose up -d          # detached mode
-#   docker-compose logs -f eco-loop  # follow backend logs
+#   docker compose up --build
+#   docker compose up -d          # detached mode
+#   docker compose logs -f eco-loop  # follow backend logs
 #
 # The Ollama container pulls the Qwen2.5 model on first startup.
 # GPU acceleration requires the NVIDIA Container Toolkit.
@@ -25,6 +23,12 @@ services:
     environment:
       - OLLAMA_KEEP_ALIVE=24h
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     # Uncomment the following for GPU support (requires NVIDIA Container Toolkit):
     # deploy:
     #   resources:
@@ -39,10 +43,11 @@ services:
     image: ollama/ollama:latest
     container_name: eco-loop-model-pull
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     entrypoint: >
       sh -c "
-        sleep 5 &&
+        echo 'Waiting for Ollama to become ready and pulling qwen2.5:7b ...' &&
         ollama pull qwen2.5:7b &&
         echo 'Model qwen2.5:7b is ready.'
       "
@@ -59,7 +64,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     environment:
       - SIMULATION_MODE=true
       - OLLAMA_HOST=http://ollama:11434

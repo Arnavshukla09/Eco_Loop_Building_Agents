@@ -20,18 +20,11 @@ Response format: AgentDecision JSON schema (Pydantic → JSON Schema).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from typing import Dict, List, Optional
-
-from tenacity import (
-    RetryError,
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-)
 
 from backend.models import AgentDecision, BuildingObservation, HistoryEntry, ZoneSetpoint
 from config.settings import settings
@@ -154,7 +147,7 @@ def _rule_based_decision(obs: BuildingObservation) -> AgentDecision:
 
 class BuildingAIAgent:
     """
-    AI agent that queries a local Ollama LLM and returns structured HVAC decisions.
+    AI agent that queries a local Ollama LLM asynchronously and returns structured HVAC decisions.
     """
 
     def __init__(self) -> None:
@@ -163,9 +156,9 @@ class BuildingAIAgent:
         self._temp    = settings.LLM_TEMPERATURE
         self._timeout = settings.LLM_TIMEOUT_SECONDS
         self._available = False
-        self._client  = None
         self._last_decision_time: Optional[float] = None
         self._decision_count = 0
+        self._last_health_check_time: float = 0.0
 
         self._initialise_client()
 
@@ -173,57 +166,86 @@ class BuildingAIAgent:
         try:
             import ollama  # type: ignore
             client = ollama.Client(host=self._host)
-            # Verify connection and model availability
             models = client.list()
             available_models = [m.model for m in models.models] if hasattr(models, "models") else []
             if not any(self._model in m for m in available_models):
                 logger.warning(
-                    "Model '%s' not found in Ollama (available: %s). "
-                    "Run: ollama pull %s",
+                    "Model '%s' not found in Ollama (available: %s). Run: ollama pull %s",
                     self._model,
                     available_models,
                     self._model,
                 )
-                # Still mark available — Ollama may pull on first use
-            self._client = client
             self._available = True
-            logger.info(
-                "Ollama connection established at %s. Model: %s.",
-                self._host,
-                self._model,
-            )
+            logger.info("Ollama connection established at %s. Model: %s.", self._host, self._model)
         except Exception as exc:
-            logger.warning(
-                "Ollama not available (%s). Using rule-based fallback.",
-                exc,
-            )
+            logger.info("Ollama not currently available (%s). Starting in rule-based fallback mode.", exc)
             self._available = False
 
     @property
     def is_available(self) -> bool:
         return self._available
 
-    @retry(
-        retry=retry_if_exception_type(Exception),
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=False,
-    )
-    def _call_ollama(self, messages: list) -> Optional[str]:
-        """Call Ollama with retry logic.  Returns raw JSON string or None."""
+    async def check_availability(self) -> bool:
+        """Periodic bounded health check allowing recovery if Ollama comes online."""
+        now = time.monotonic()
+        if now - self._last_health_check_time < 30.0:
+            return self._available
+        self._last_health_check_time = now
+
+        try:
+            import ollama  # type: ignore
+            client = ollama.AsyncClient(host=self._host)
+            await asyncio.wait_for(client.list(), timeout=3.0)
+            if not self._available:
+                logger.info("Ollama service recovered! Resuming AI agent inference with model '%s'.", self._model)
+            self._available = True
+            return True
+        except Exception:
+            if self._available:
+                logger.warning("Ollama connection lost. Switching to rule-based fallback.")
+            self._available = False
+            return False
+
+    async def _call_ollama_async(self, messages: list) -> Optional[str]:
+        """Non-blocking call to Ollama with timeout and bounded retry."""
         import ollama  # type: ignore
 
-        response = self._client.chat(
-            model=self._model,
-            messages=messages,
-            format=AgentDecision.model_json_schema(),
-            options={
-                "temperature": self._temp,
-                "num_predict": 600,
-                "top_p": 0.9,
-            },
-        )
-        return response.message.content
+        client = ollama.AsyncClient(host=self._host)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, 3):
+            try:
+                response = await asyncio.wait_for(
+                    client.chat(
+                        model=self._model,
+                        messages=messages,
+                        format=AgentDecision.model_json_schema(),
+                        options={
+                            "temperature": self._temp,
+                            "num_predict": 600,
+                            "top_p": 0.9,
+                        },
+                    ),
+                    timeout=float(self._timeout),
+                )
+                return response.message.content
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError as exc:
+                last_exc = exc
+                logger.warning("Ollama inference timed out after %ds (attempt %d/2).", self._timeout, attempt)
+                if attempt < 2:
+                    await asyncio.sleep(1.0)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Ollama inference call failed on attempt %d/2: %s", attempt, exc)
+                if attempt < 2:
+                    await asyncio.sleep(1.0)
+
+        # Retries exhausted
+        self._available = False
+        logger.warning("Ollama inference unavailable after retries (%s). Using fallback.", last_exc)
+        return None
 
     async def analyze_and_decide(
         self,
@@ -231,12 +253,16 @@ class BuildingAIAgent:
         history: Optional[List[HistoryEntry]] = None,
     ) -> AgentDecision:
         """
-        Main entry point.  Returns an AgentDecision always (falls back on error).
+        Main entry point. Asynchronously queries Ollama or falls back safely.
         """
         if history is None:
             history = []
 
         start = time.monotonic()
+
+        # Check for recovery if currently marked unavailable
+        if not self._available:
+            await self.check_availability()
 
         if not self._available:
             logger.debug("LLM unavailable – using rule-based fallback.")
@@ -252,9 +278,9 @@ class BuildingAIAgent:
         ]
 
         try:
-            raw = self._call_ollama(messages)
+            raw = await self._call_ollama_async(messages)
             if raw is None:
-                raise ValueError("Empty response from Ollama.")
+                raise ValueError("Empty or failed response from Ollama.")
 
             decision = AgentDecision.model_validate_json(raw)
             # Validate and clamp all setpoints
@@ -273,10 +299,10 @@ class BuildingAIAgent:
             )
             return decision
 
-        except RetryError as exc:
-            logger.warning("Ollama retries exhausted: %s", exc)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            logger.warning("LLM parsing error: %s — using rule-based fallback.", exc)
+            logger.warning("LLM decision error: %s — using rule-based fallback.", exc)
 
         fallback = _rule_based_decision(obs)
         fallback.reasoning = "[Fallback] " + fallback.reasoning

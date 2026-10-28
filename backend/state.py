@@ -12,7 +12,7 @@ import asyncio
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Deque, Dict, List, Optional
 
 from backend.models import (
@@ -166,32 +166,33 @@ class BuildingStateStore:
     # ── Metrics computation ──────────────────────────────────────────────────
 
     def _compute_metrics_locked(self, obs: BuildingObservation) -> MetricsSummary:
-        """Compute KPI metrics.  Must be called with lock held."""
+        """Compute KPI metrics from real measurements. Must be called with lock held."""
         # Comfort: map avg PPD to [0, 1] score (100% PPD → 0, 5% PPD → 1)
         avg_ppd = obs.avg_ppd
         comfort_score = max(0.0, 1.0 - avg_ppd / 100.0)
 
-        # Baseline energy: project what total would be with always-on max setpoints
-        # (simple proportional model: timestep energy ∝ thermal load)
-        baseline_factor = 1.15  # baseline uses ~15% more energy (tighter setpoints)
-        baseline_kwh = obs.total_energy_kwh * baseline_factor + self._baseline_energy_kwh
-
-        # Savings vs baseline
-        if baseline_kwh > 0:
-            savings_pct = max(0.0, (baseline_kwh - obs.total_energy_kwh) / baseline_kwh * 100.0)
+        # Baseline energy: use measured fixed-setpoint reference if available
+        if self._baseline_energy_kwh > 0.0:
+            baseline_kwh = self._baseline_energy_kwh
+            baseline_mode = "measured"
+            savings_pct = (baseline_kwh - obs.total_energy_kwh) / baseline_kwh * 100.0
+            co2_saved = (baseline_kwh - obs.total_energy_kwh) * CO2_KG_PER_KWH
         else:
+            # Baseline unmeasured or same as current at step 0
+            baseline_kwh = obs.total_energy_kwh
+            baseline_mode = "unmeasured"
             savings_pct = 0.0
-
-        co2_saved = max(0.0, (baseline_kwh - obs.total_energy_kwh) * CO2_KG_PER_KWH)
+            co2_saved = 0.0
 
         return MetricsSummary(
             comfort_score=round(comfort_score, 4),
             energy_savings_pct=round(savings_pct, 2),
             baseline_energy_kwh=round(baseline_kwh, 3),
             current_energy_kwh=round(obs.total_energy_kwh, 3),
-            co2_saved_kg=round(co2_saved, 3),
+            co2_saved_kg=round(max(0.0, co2_saved), 3),
             peak_demand_kw=round(self._peak_demand_kw, 2),
             avg_temp_c=round(obs.avg_temperature, 2),
+            baseline_mode=baseline_mode,
         )
 
     def get_metrics(self) -> Optional[MetricsSummary]:
@@ -207,7 +208,7 @@ class BuildingStateStore:
                 return None
             metrics = self._compute_metrics_locked(obs)
             return DashboardUpdate(
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 building=obs,
                 ai_decision=self._decision,
                 metrics=metrics,

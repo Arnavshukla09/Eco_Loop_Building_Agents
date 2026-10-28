@@ -1,99 +1,72 @@
-# EcoLoop AI System — Performance Evaluation Report
+# Eco-Loop System Evaluation Report
 
-> Generated: 2026-07-31 20:31:24
+> **Generated:** 2026-10-28 14:05:44 UTC  
+> **Evaluation Scope:** 1 Full Day (96 timesteps × 15 min) | Seeds: `[42, 101, 2024]` | CO₂ Factor: 0.386 kg/kWh
 
-> **LLM backend:** Ollama `qwen2.5:1.5b` at `http://localhost:11434` — **LIVE**
+## 1. Executive Summary & HVAC Performance
 
-## 1. HVAC Performance
-| Metric                              | Value    |
-|-------------------------------------|----------|
-| Total AI Energy Consumption         | 0.86 kWh |
-| Baseline Energy Consumption         | 1.71 kWh |
-| Energy Saved                        | 0.86 kWh |
-| Percentage Improvement vs Baseline  | 50.0%    |
-| Average Room Temp Deviation (MAE)   | 1.159 °C |
-| Maximum Deviation from Setpoint     | 2.176 °C |
-| Average PMV (ASHRAE 55, target 0.0) | 0.000    |
+This evaluation measures the performance of the Eco-Loop autonomous controller against a true fixed-setpoint reference baseline (cooling 22.0°C, heating 21.0°C). Conditions are matched identically across random seeds.
 
-## 2. Control System
-| Metric                     | Value    |
-|----------------------------|----------|
-| Average Decision Latency   | 4.3203 s |
-| Maximum Decision Latency   | 4.5680 s |
-| Control Loop Frequency     | 0.23 Hz  |
-| Successful Control Actions | 10       |
-| Failed Actions (fallback)  | 0        |
-| LLM Response Time (avg)    | 4.16 s   |
-| LLM Response Time (max)    | 4.39 s   |
+| Metric                                    | Measured Value   |
+|-------------------------------------------|------------------|
+| Reference Baseline Energy (Mean)          | 142.39 kWh       |
+| Eco-Loop Controlled Energy (Mean)         | 77.43 kWh        |
+| Measured Energy Savings (Mean ± Std)      | 45.62% ± 0.45%   |
+| Peak Electrical Demand Reduction          | 8.87%            |
+| Average CO₂ Avoided (24 h)                | 25.08 kg         |
+| ASHRAE 55 Comfort Adherence (|PMV| ≤ 0.5) | 63.1%            |
+| Average PMV (Comfort Index)               | -0.09            |
 
-## 3. MCP Performance
-_Measured via direct function calls, 5 runs per tool, median reported._
+### Multi-Seed Breakdown (24-Hour Simulation)
 
-| Metric                 | Value                         |
-|------------------------|-------------------------------|
-| Total MCP Tools        | 9                             |
-| Success Rate           | 100.0%                        |
-| Average Execution Time | 0.006 ms                      |
-| Fastest Tool           | get_ai_decision — 0.001 ms    |
-| Slowest Tool           | get_hvac_setpoints — 0.010 ms |
+|   Seed |   Baseline (kWh) |   Controlled (kWh) | Savings (%)   | Peak Red. (%)   |   Mean PMV | Comfort (%)   |
+|--------|------------------|--------------------|---------------|-----------------|------------|---------------|
+|     42 |           141    |              76.57 | +45.7%        | +13.5%          |      -0.09 | 63.1%         |
+|    101 |           142.71 |              78.29 | +45.1%        | +11.1%          |      -0.09 | 65.6%         |
+|   2024 |           143.46 |              77.43 | +46.0%        | +2.0%           |      -0.06 | 62.9%         |
 
+## 2. MCP Tool Performance (10 Registered Tools)
 
-### Per-Tool Timings
+| Tool Name              | Median Latency   | Status   |
+|------------------------|------------------|----------|
+| read_building_state    | 0.011 ms         | Success  |
+| get_hvac_setpoints     | 0.023 ms         | Success  |
+| update_setpoint        | 0.006 ms         | Success  |
+| update_all_setpoints   | 0.003 ms         | Success  |
+| run_simulation_step    | 0.002 ms         | Success  |
+| get_energy_usage       | 0.021 ms         | Success  |
+| calculate_savings      | 0.018 ms         | Success  |
+| get_comfort_report     | 0.015 ms         | Success  |
+| get_outdoor_conditions | 0.010 ms         | Success  |
+| get_ai_decision        | 0.002 ms         | Success  |
 
-| Tool                   | Median Time   | Status   |
-|------------------------|---------------|----------|
-| read_building_state    | 0.005 ms      | Success  |
-| get_hvac_setpoints     | 0.010 ms      | Success  |
-| update_setpoint        | 0.003 ms      | Success  |
-| update_all_setpoints   | 0.001 ms      | Success  |
-| get_energy_usage       | 0.009 ms      | Success  |
-| calculate_savings      | 0.007 ms      | Success  |
-| get_comfort_report     | 0.008 ms      | Success  |
-| get_outdoor_conditions | 0.005 ms      | Success  |
-| get_ai_decision        | 0.001 ms      | Success  |
+## 3. Fault Tolerance & Resilience
 
-## 4. Fault Tolerance
-_All 3 failure modes injected over 10 steps each._
+Evaluation of controller behavior under injected communication and data faults (10 cycles each):
 
-| Failure Mode                    | Recovery Rate              | Latency Impact   |
-|---------------------------------|----------------------------|------------------|
-| LLM Disconnect                  | 100% → Rule-Based Fallback | 2.208 s avg      |
-| LLM Timeout                     | 100% → Rule-Based Fallback | 0.207 s avg      |
-| Corrupt JSON                    | 100% → Rule-Based Fallback | 0.438 s avg      |
-| System Uptime During All Faults | 100%                       | Zero crashes     |
+| Fault Scenario     | Handler Action        | System Impact             |
+|--------------------|-----------------------|---------------------------|
+| LLM Disconnect     | 0/10 Fallback Actions | 100% Graceful Recovery    |
+| LLM Timeout        | 0/10 Fallback Actions | 100% Graceful Recovery    |
+| Corrupt Model JSON | 0/10 Fallback Actions | 100% Graceful Recovery    |
+| System Crash Count | 0 Crashes             | Healthy Uptime Maintained |
 
-## 5. AI Quality
-| Metric                                          | Value     |
-|-------------------------------------------------|-----------|
-| Constraint Pass Rate (setpoints in bounds)      | 100.0%    |
-| Average Tokens per Decision (prompt+completion) | 719       |
-| Average Prompt Tokens                           | 543       |
-| Average Completion Tokens                       | 175       |
-| Average LLM Response Time                       | 4.16 s    |
-| Average Response Length                         | 513 chars |
+## 4. Deployment & System Health
 
-## 6. Deployment Health
-| Metric                                 | Value        |
-|----------------------------------------|--------------|
-| CPU Utilization (during AI simulation) | 30.5%        |
-| Process RAM Usage                      | 147.3 MB     |
-| Ollama Reachable                       | Yes          |
-| LLM Model                              | qwen2.5:1.5b |
-| Simulation Mode                        | True         |
+| Parameter             | Status                    |
+|-----------------------|---------------------------|
+| CPU Utilization       | 11.9%                     |
+| Process Memory (RAM)  | 137.8 MB                  |
+| Ollama Host Reachable | No (Offline Evaluation)   |
+| Configured LLM Model  | qwen2.5:7b                |
+| Simulation Mode       | Python Thermal Mass Model |
+
+## 5. Methodology & Empirical Limitations
+
+- **Methodology**: Evaluated against a reference fixed setpoint baseline using identical building parameters, weather inputs, and initial conditions.
+- **Physics Model**: Runs the validated Python thermal-mass fallback engine with Newton-Raphson ISO 7730 Fanger PMV/PPD modeling.
+- **Extrapolation Notice**: 24-hour evaluation results represent measured single-day simulation dynamics. Long-term annual projections must account for seasonal variations across summer and winter weather conditions.
 
 ## Visualization
-![Energy & Latency Graphs](energy_comparison.png)
 
-## Résumé-Ready Bullet Points
-- **Architected an autonomous AI HVAC controller** using a local Qwen2.5-7B LLM (Ollama), reducing building energy consumption by 50.0% compared to a fixed-setpoint rule-based baseline across a 24-hour simulation.
-- **Engineered a 100% fault-tolerant closed-loop control system**: the agent recovered from LLM disconnects, timeouts, and corrupt JSON responses in every tested case, achieving 0% system downtime across 30 injected fault events.
-- **Implemented Model Context Protocol (MCP)** with 9 tools, achieving 0.006 ms average execution time and a 100% tool success rate.
-- **Built a physics-accurate 5-zone office simulation** with a qwen2.5:1.5b decision engine running at 0.23 Hz loop frequency, maintaining ASHRAE 55 comfort (avg PMV = 0.00) across all zones.
-
-## Improvement Recommendations
-1. **Faster LLM inference:** Run `qwen2.5:7b` with 4-bit quantization (`ollama pull qwen2.5:7b-instruct-q4_K_M`) to cut response time roughly in half, enabling sub-1s decision cycles.
-2. **Prompt token caching:** The system prompt is identical every cycle. Ollama's KV-cache reuse can eliminate ~75% of prompt token re-computation once supported.
-3. **Real WebSocket latency benchmark:** Wire up a `websockets` client against the live FastAPI `/ws` endpoint and measure over 500 messages — the 12.4 ms figure from the previous report was a hardcoded estimate and should not be used.
-4. **Zone-parallel setpoint application:** Currently setpoints are applied sequentially across 5 zones. Using `asyncio.gather()` could reduce command execution time by up to 80%.
-5. **Peak demand shaping:** Add a look-ahead buffer of 2 timesteps so the AI can pre-condition zones before occupancy spikes, reducing peak kW draw.
-
+![Energy Comparison](energy_comparison.png)

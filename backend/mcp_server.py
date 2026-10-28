@@ -179,6 +179,37 @@ async def update_all_setpoints(cooling_c: float, heating_c: float) -> Dict[str, 
 
 
 @mcp.tool()
+async def run_simulation_step() -> Dict[str, Any]:
+    """
+    Advance the building simulation environment by one timestep.
+    Returns the updated building observation summary.
+    """
+    from backend.controller import controller
+    if controller is None or controller.env is None:
+        return {"success": False, "error": "Simulation environment not initialised."}
+
+    try:
+        obs = await controller.env.step()
+        if controller.baseline_env is not None:
+            try:
+                base_obs = await controller.baseline_env.step()
+                _state().update_baseline_energy(base_obs.total_energy_kwh)
+            except Exception:
+                pass
+        _state().update_observation(obs)
+        return {
+            "success": True,
+            "timestep": obs.timestep,
+            "simulation_time": obs.simulation_time.isoformat(),
+            "avg_temperature_c": round(obs.avg_temperature, 2),
+            "total_energy_kwh": round(obs.total_energy_kwh, 3),
+            "hvac_power_kw": round(obs.hvac_power_kw, 2),
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@mcp.tool()
 def get_energy_usage() -> Dict[str, Any]:
     """
     Return detailed energy consumption data including cumulative usage,

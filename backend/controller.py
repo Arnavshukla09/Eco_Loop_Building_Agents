@@ -21,7 +21,7 @@ import logging
 import time
 from typing import Optional
 
-from backend.energyplus_runner import BuildingEnvironment, create_environment
+from backend.energyplus_runner import BuildingEnvironment, SimulatedBuildingEnvironment, create_environment
 from backend.llm_agent import agent
 from backend.models import AgentDecision, BuildingObservation
 from backend.state import state_store
@@ -41,6 +41,7 @@ class AutonomousController:
 
     def __init__(self) -> None:
         self.env: Optional[BuildingEnvironment] = None
+        self.baseline_env: Optional[BuildingEnvironment] = None
         self._running   = False
         self._sim_task:   Optional[asyncio.Task] = None
         self._agent_task: Optional[asyncio.Task] = None
@@ -54,6 +55,12 @@ class AutonomousController:
         logger.info("Initialising building environment …")
         self.env = create_environment()
         logger.info("Using environment: %s", self.env.name)
+
+        if isinstance(self.env, SimulatedBuildingEnvironment):
+            self.baseline_env = SimulatedBuildingEnvironment(is_baseline=True)
+            logger.info("Parallel fixed-setpoint reference baseline initialised.")
+        else:
+            self.baseline_env = None
 
         state_store.set_simulation_running(True)
         state_store.set_llm_available(agent.is_available)
@@ -70,10 +77,12 @@ class AutonomousController:
             self._agent_loop(), name="agent-loop"
         )
 
+        step_wall_time = settings.TIMESTEP_MINUTES * 60.0 / settings.SPEEDUP_FACTOR
         logger.info(
-            "Controller started. Sim interval: %.0f s/step (×%.0f speedup). "
+            "Controller started. Sim interval: %.2f s wall-clock per step (%.0f min simulated, ×%.1f speedup). "
             "Agent interval: %.0f s.",
-            settings.SPEEDUP_FACTOR * settings.TIMESTEP_MINUTES,
+            step_wall_time,
+            settings.TIMESTEP_MINUTES,
             settings.SPEEDUP_FACTOR,
             settings.AGENT_INTERVAL_SECONDS,
         )
@@ -111,6 +120,12 @@ class AutonomousController:
             try:
                 t0  = time.monotonic()
                 obs = await self.env.step()
+                if self.baseline_env is not None:
+                    try:
+                        base_obs = await self.baseline_env.step()
+                        state_store.update_baseline_energy(base_obs.total_energy_kwh)
+                    except Exception as base_exc:
+                        logger.warning("Baseline reference step failed: %s", base_exc)
                 state_store.update_observation(obs)
                 self._step_count += 1
 
