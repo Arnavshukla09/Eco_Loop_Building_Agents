@@ -13,8 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
-
+from pydantic import BaseModel, Field, field_validator, computed_field
 
 # ── Zone-level state ──────────────────────────────────────────────────────────
 
@@ -29,6 +28,7 @@ class ZoneState(BaseModel):
     ppd_score: float = Field(..., description="Predicted Percentage Dissatisfied (0–100 %)")
     humidity: float = Field(..., description="Relative humidity (%)")
 
+    @computed_field
     @property
     def comfort_label(self) -> str:
         if abs(self.pmv_score) < 0.5:
@@ -53,18 +53,21 @@ class BuildingObservation(BaseModel):
     occupancy: float = Field(..., ge=0.0, le=1.0, description="Building occupancy ratio (0–1)")
     timestep: int = Field(default=0, description="Sequential timestep counter")
 
+    @computed_field
     @property
     def avg_temperature(self) -> float:
         if not self.zones:
             return 0.0
         return sum(z.temperature for z in self.zones.values()) / len(self.zones)
 
+    @computed_field
     @property
     def avg_pmv(self) -> float:
         if not self.zones:
             return 0.0
         return sum(z.pmv_score for z in self.zones.values()) / len(self.zones)
 
+    @computed_field
     @property
     def avg_ppd(self) -> float:
         if not self.zones:
