@@ -24,6 +24,7 @@ from typing import Optional
 from backend.energyplus_runner import BuildingEnvironment, SimulatedBuildingEnvironment, create_environment
 from backend.llm_agent import agent
 from backend.models import AgentDecision, BuildingObservation, validate_setpoints
+from backend.repository import repository
 from backend.state import state_store
 from config.settings import settings
 
@@ -48,6 +49,7 @@ class AutonomousController:
         self._step_count  = 0
         self._agent_count = 0
         self._step_lock: Optional[asyncio.Lock] = None
+        self._current_run_id: Optional[str] = None
 
     @property
     def step_lock(self) -> asyncio.Lock:
@@ -59,6 +61,11 @@ class AutonomousController:
 
     async def start(self) -> None:
         """Initialise environment and launch background tasks."""
+        try:
+            self._current_run_id = await repository.create_run()
+        except Exception as exc:
+            logger.warning("Database run initialisation deferred: %s", exc)
+
         logger.info("Initialising building environment …")
         self.env = create_environment()
         logger.info("Using environment: %s", self.env.name)
@@ -105,6 +112,27 @@ class AutonomousController:
                 except asyncio.CancelledError:
                     pass
         state_store.set_simulation_running(False)
+
+        # Complete run in database if active
+        if self._current_run_id:
+            try:
+                metrics = state_store.get_metrics()
+                obs_prev = state_store.get_observation()
+                total_kwh = obs_prev.total_energy_kwh if obs_prev else 0.0
+                base_kwh = metrics.baseline_energy_kwh if metrics else 0.0
+                savings = metrics.energy_savings_pct if metrics else 0.0
+                comfort = metrics.comfort_score if metrics else 0.0
+                await repository.complete_run(
+                    run_id=self._current_run_id,
+                    total_steps=self._step_count,
+                    total_energy=total_kwh,
+                    baseline_energy=base_kwh,
+                    savings_pct=savings,
+                    comfort_score=comfort,
+                )
+            except Exception as exc:
+                logger.debug("Database run completion on stop skipped: %s", exc)
+
         logger.info("Controller stopped.")
 
     # ── Safe Single-Owner Simulation Step ──────────────────────────────────────
@@ -128,6 +156,20 @@ class AutonomousController:
                     logger.warning("Baseline reference step failed: %s", base_exc)
             state_store.update_observation(obs)
             self._step_count += 1
+
+            # Persist reading to database in background
+            if self._current_run_id:
+                history_entries = state_store.get_history(limit=1)
+                if history_entries:
+                    try:
+                        asyncio.create_task(
+                            repository.record_reading(
+                                self._current_run_id, history_entries[-1], obs.timestep
+                            )
+                        )
+                    except Exception:
+                        pass
+
             return obs
 
     # ── Simulation loop ────────────────────────────────────────────────────────
@@ -268,8 +310,29 @@ class AutonomousController:
         """
         Safely reset both active simulation and parallel baseline to step 0.
         Guarded by step_lock to prevent race conditions with background loops.
+        Archives previous run statistics in database and starts a fresh active run.
         """
         async with self.step_lock:
+            if self._current_run_id:
+                try:
+                    metrics = state_store.get_metrics()
+                    obs_prev = state_store.get_observation()
+                    total_kwh = obs_prev.total_energy_kwh if obs_prev else 0.0
+                    base_kwh = metrics.baseline_energy_kwh if metrics else 0.0
+                    savings = metrics.energy_savings_pct if metrics else 0.0
+                    comfort = metrics.comfort_score if metrics else 0.0
+                    await repository.complete_run(
+                        run_id=self._current_run_id,
+                        total_steps=self._step_count,
+                        total_energy=total_kwh,
+                        baseline_energy=base_kwh,
+                        savings_pct=savings,
+                        comfort_score=comfort,
+                    )
+                    self._current_run_id = await repository.create_run()
+                except Exception as exc:
+                    logger.warning("Database archiving on reset deferred: %s", exc)
+
             self.env = create_environment()
             if isinstance(self.env, SimulatedBuildingEnvironment):
                 self.baseline_env = SimulatedBuildingEnvironment(is_baseline=True)
@@ -296,6 +359,17 @@ class AutonomousController:
                     if ok:
                         state_store.update_setpoint(zone, sp.cooling, sp.heating)
                         applied += 1
+
+        if self._current_run_id:
+            obs = state_store.get_observation()
+            timestep = obs.timestep if obs else 0
+            try:
+                asyncio.create_task(
+                    repository.record_decision(self._current_run_id, decision, timestep)
+                )
+            except Exception:
+                pass
+
         logger.info(
             "Applied setpoints for %d/%d zones. Mode: %s, Fan: %s.",
             applied,

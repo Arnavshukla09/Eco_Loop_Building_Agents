@@ -74,3 +74,9 @@ htmlcov/
 
 # Ollama model cache (large)
 .ollama/
+
+# Database / SQLite persistence files
+*.db
+*.sqlite
+*.sqlite3
+data/

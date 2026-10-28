@@ -34,8 +34,10 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.controller import controller
 from backend.dashboard_api import broadcast_loop, websocket_endpoint
+from backend.database import close_db, init_db
 from backend.mcp_server import mcp
 from backend.models import HealthStatus, SetpointCommand
+from backend.repository import repository
 from backend.state import state_store
 from config.settings import settings
 
@@ -95,6 +97,12 @@ async def lifespan(app: FastAPI):
 
     # FastMCP lifespan provides taskgroup execution for MCP clients
     async with mcp_asgi_app.lifespan(app):
+        # Initialise database schema
+        try:
+            await init_db()
+        except Exception as exc:
+            logger.warning("Database init encountered warning: %s", exc)
+
         # Start the autonomous controller (simulation + AI agent)
         await controller.start()
 
@@ -115,6 +123,10 @@ async def lifespan(app: FastAPI):
                     pass
             await controller.stop()
             state_store.set_mcp_running(False)
+            try:
+                await close_db()
+            except Exception:
+                pass
             logger.info("Eco-Loop shut down cleanly.")
 
 
@@ -208,10 +220,29 @@ async def get_status() -> JSONResponse:
 
 @app.get("/api/history")
 async def get_history(limit: int = 100) -> JSONResponse:
-    """Return the last `limit` historical data points for chart initialisation."""
-    limit  = max(1, min(limit, settings.HISTORY_MAX_LEN))
+    """Return historical data points for chart initialisation, querying database if memory is cold."""
+    limit = max(1, min(limit, settings.HISTORY_MAX_LEN))
     entries = state_store.get_history(limit=limit)
+    if len(entries) < limit:
+        try:
+            db_entries = await repository.get_history(limit=limit)
+            if len(db_entries) > len(entries):
+                entries = db_entries
+        except Exception as exc:
+            logger.debug("Database history lookup bypassed: %s", exc)
     return JSONResponse(content={"entries": [e.model_dump(mode="json") for e in entries]})
+
+
+@app.get("/api/simulation/runs")
+async def list_simulation_runs(limit: int = 20) -> JSONResponse:
+    """List archived simulation runs and achieved energy/comfort performance."""
+    limit = max(1, min(limit, 100))
+    try:
+        runs = await repository.list_runs(limit=limit)
+    except Exception as exc:
+        logger.debug("Database runs query failed: %s", exc)
+        runs = []
+    return JSONResponse(content={"runs": runs})
 
 
 @app.get("/api/health")

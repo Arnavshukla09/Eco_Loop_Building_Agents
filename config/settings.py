@@ -129,6 +129,12 @@ class Settings(BaseSettings):
         description="Seconds between WebSocket state broadcasts to the dashboard.",
     )
 
+    # ── Database / Persistence ────────────────────────────────────────────────
+    DATABASE_URL: str = Field(
+        default=f"sqlite+aiosqlite:///{str((ROOT_DIR / 'data' / 'ecoloop.db').as_posix())}",
+        description="Database connection URL. Defaults to local SQLite via aiosqlite.",
+    )
+
     # ── Metrics ───────────────────────────────────────────────────────────────
     HISTORY_MAX_LEN: int = Field(
         default=500,
