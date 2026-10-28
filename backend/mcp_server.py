@@ -58,6 +58,22 @@ def _env():
     return controller.env if controller is not None else None
 
 
+def _verify_mcp_auth(api_key: Optional[str] = None) -> Optional[str]:
+    """
+    Helper to enforce fail-closed security for mutating MCP operations.
+    Returns error string if unauthorized/misconfigured, or None if authorized.
+    """
+    is_prod = settings.ENVIRONMENT.lower() in ("production", "prod")
+    if (is_prod or settings.REQUIRE_API_KEY) and not settings.API_KEY:
+        return "Server security misconfiguration: API_KEY must be configured in production environment."
+
+    if settings.API_KEY:
+        if not api_key or api_key != settings.API_KEY:
+            return "Forbidden: mutating MCP operations require a valid 'api_key'."
+
+    return None
+
+
 # ══ Tool definitions ═══════════════════════════════════════════════════════════
 
 @mcp.tool()
@@ -114,32 +130,37 @@ def get_hvac_setpoints() -> Dict[str, Any]:
 
 
 @mcp.tool()
-async def update_setpoint(zone: str, cooling_c: float, heating_c: float) -> Dict[str, Any]:
+async def update_setpoint(
+    zone: str,
+    cooling_c: float,
+    heating_c: float,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Update the cooling and heating setpoints for a specific zone.
+    Mutating MCP tool: Requires valid api_key when authentication is configured.
 
     Args:
         zone:       Zone name (e.g. 'Core', 'Perimeter_N'). Case-sensitive.
-        cooling_c:  New cooling setpoint in °C (must be > heating_c + 2).
+        cooling_c:  New cooling setpoint in °C (must be >= heating_c + 1.5).
         heating_c:  New heating setpoint in °C.
+        api_key:    Authorization API key if authentication is enabled.
 
     Returns a confirmation dict with the applied values.
     """
-    if zone not in settings.ZONES:
-        return {
-            "success": False,
-            "error": f"Unknown zone '{zone}'. Valid zones: {settings.ZONES}",
-        }
+    auth_err = _verify_mcp_auth(api_key)
+    if auth_err:
+        return {"success": False, "error": auth_err}
 
-    # Clamp to safe range
-    cooling_c = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cooling_c))
-    heating_c = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, heating_c))
-    if cooling_c <= heating_c + 1.5:
-        cooling_c = heating_c + 2.0
+    from backend.models import validate_setpoints
+    try:
+        validate_setpoints(cooling_c, heating_c, zone)
+    except ValueError as exc:
+        return {"success": False, "error": f"Validation error: {exc}"}
 
-    env = _env()
-    if env is not None:
-        success = await env.set_setpoint(zone, cooling_c, heating_c)
+    from backend.controller import controller
+    if controller is not None:
+        success = await controller.set_zone_setpoint(zone, cooling_c, heating_c)
     else:
         success = False
 
@@ -153,50 +174,61 @@ async def update_setpoint(zone: str, cooling_c: float, heating_c: float) -> Dict
 
 
 @mcp.tool()
-async def update_all_setpoints(cooling_c: float, heating_c: float) -> Dict[str, Any]:
+async def update_all_setpoints(
+    cooling_c: float,
+    heating_c: float,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Apply the same cooling and heating setpoints to ALL zones simultaneously.
+    Mutating MCP tool: Requires valid api_key when authentication is configured.
 
     Args:
         cooling_c:  New cooling setpoint in °C for all zones.
         heating_c:  New heating setpoint in °C for all zones.
+        api_key:    Authorization API key if authentication is enabled.
     """
-    cooling_c = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cooling_c))
-    heating_c = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, heating_c))
-    if cooling_c <= heating_c + 1.5:
-        cooling_c = heating_c + 2.0
+    auth_err = _verify_mcp_auth(api_key)
+    if auth_err:
+        return {"success": False, "error": auth_err}
 
-    env = _env()
-    if env is not None:
-        await env.set_all_setpoints(cooling_c, heating_c)
-        return {
-            "success":     True,
-            "zones_updated": settings.ZONES,
-            "cooling_c":   round(cooling_c, 1),
-            "heating_c":   round(heating_c, 1),
-        }
+    from backend.models import validate_setpoints
+    try:
+        validate_setpoints(cooling_c, heating_c, None)
+    except ValueError as exc:
+        return {"success": False, "error": f"Validation error: {exc}"}
+
+    from backend.controller import controller
+    if controller is not None:
+        success = await controller.set_all_zone_setpoints(cooling_c, heating_c)
+        if success:
+            return {
+                "success":     True,
+                "zones_updated": settings.ZONES,
+                "cooling_c":   round(cooling_c, 1),
+                "heating_c":   round(heating_c, 1),
+            }
     return {"success": False, "error": "Controller not running."}
 
 
 @mcp.tool()
-async def run_simulation_step() -> Dict[str, Any]:
+async def run_simulation_step(api_key: Optional[str] = None) -> Dict[str, Any]:
     """
     Advance the building simulation environment by one timestep.
+    Guarded by the controller's simulation step lock to prevent data races.
+    Mutating MCP tool: Requires valid api_key when authentication is configured.
     Returns the updated building observation summary.
     """
+    auth_err = _verify_mcp_auth(api_key)
+    if auth_err:
+        return {"success": False, "error": auth_err}
+
     from backend.controller import controller
     if controller is None or controller.env is None:
         return {"success": False, "error": "Simulation environment not initialised."}
 
     try:
-        obs = await controller.env.step()
-        if controller.baseline_env is not None:
-            try:
-                base_obs = await controller.baseline_env.step()
-                _state().update_baseline_energy(base_obs.total_energy_kwh)
-            except Exception:
-                pass
-        _state().update_observation(obs)
+        obs = await controller.step_simulation()
         return {
             "success": True,
             "timestep": obs.timestep,

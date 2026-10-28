@@ -168,15 +168,17 @@ class BuildingAIAgent:
             client = ollama.Client(host=self._host)
             models = client.list()
             available_models = [m.model for m in models.models] if hasattr(models, "models") else []
-            if not any(self._model in m for m in available_models):
+            has_model = any(self._model == m or self._model in m or m.startswith(self._model.split(":")[0]) for m in available_models)
+            if not has_model:
                 logger.warning(
-                    "Model '%s' not found in Ollama (available: %s). Run: ollama pull %s",
+                    "Configured model '%s' not found in Ollama (available: %s). Running in rule-based fallback.",
                     self._model,
                     available_models,
-                    self._model,
                 )
-            self._available = True
-            logger.info("Ollama connection established at %s. Model: %s.", self._host, self._model)
+                self._available = False
+            else:
+                self._available = True
+                logger.info("Ollama connection established at %s. Verified model: %s.", self._host, self._model)
         except Exception as exc:
             logger.info("Ollama not currently available (%s). Starting in rule-based fallback mode.", exc)
             self._available = False
@@ -185,19 +187,28 @@ class BuildingAIAgent:
     def is_available(self) -> bool:
         return self._available
 
-    async def check_availability(self) -> bool:
-        """Periodic bounded health check allowing recovery if Ollama comes online."""
+    async def check_availability(self, force: bool = False) -> bool:
+        """Periodic bounded health check verifying Ollama connection AND configured model presence."""
         now = time.monotonic()
-        if now - self._last_health_check_time < 30.0:
+        if not force and (now - self._last_health_check_time < 30.0):
             return self._available
         self._last_health_check_time = now
 
         try:
             import ollama  # type: ignore
             client = ollama.AsyncClient(host=self._host)
-            await asyncio.wait_for(client.list(), timeout=3.0)
+            models = await asyncio.wait_for(client.list(), timeout=3.0)
+            available_models = [m.model for m in models.models] if hasattr(models, "models") else []
+            has_model = any(self._model == m or self._model in m or m.startswith(self._model.split(":")[0]) for m in available_models)
+
+            if not has_model:
+                if self._available:
+                    logger.warning("Ollama reachable but configured model '%s' not found. Using fallback.", self._model)
+                self._available = False
+                return False
+
             if not self._available:
-                logger.info("Ollama service recovered! Resuming AI agent inference with model '%s'.", self._model)
+                logger.info("Ollama service & model '%s' verified! Resuming AI inference.", self._model)
             self._available = True
             return True
         except Exception:
@@ -267,6 +278,7 @@ class BuildingAIAgent:
         if not self._available:
             logger.debug("LLM unavailable – using rule-based fallback.")
             decision = _rule_based_decision(obs)
+            decision.controller_source = "rule_based"
             decision.reasoning = "[Rule-based] " + decision.reasoning
             return decision
 
@@ -285,6 +297,7 @@ class BuildingAIAgent:
             decision = AgentDecision.model_validate_json(raw)
             # Validate and clamp all setpoints
             decision = self._validate_decision(decision, obs)
+            decision.controller_source = "llm"
 
             elapsed = time.monotonic() - start
             self._decision_count += 1
@@ -305,6 +318,7 @@ class BuildingAIAgent:
             logger.warning("LLM decision error: %s — using rule-based fallback.", exc)
 
         fallback = _rule_based_decision(obs)
+        fallback.controller_source = "rule_based"
         fallback.reasoning = "[Fallback] " + fallback.reasoning
         return fallback
 

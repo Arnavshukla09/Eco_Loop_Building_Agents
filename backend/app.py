@@ -26,9 +26,10 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Security, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from backend.controller import controller
@@ -37,6 +38,33 @@ from backend.mcp_server import mcp
 from backend.models import HealthStatus, SetpointCommand
 from backend.state import state_store
 from config.settings import settings
+
+# ── API Key Authorization Guard for Mutating Endpoints ────────────────────────
+security_bearer = HTTPBearer(auto_error=False)
+
+
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security_bearer)) -> None:
+    """
+    Protect mutating control endpoints (setpoint changes, speed overrides, resets).
+    Fail-closed security rule:
+    - In production (or if REQUIRE_API_KEY is true): API_KEY MUST be configured. If missing, raises 500.
+    - If API_KEY is set: incoming request MUST supply matching 'Authorization: Bearer <API_KEY>', else 403.
+    - Only in development mode with unconfigured API_KEY and REQUIRE_API_KEY=false are mutations permitted.
+    """
+    is_prod = settings.ENVIRONMENT.lower() in ("production", "prod")
+    if (is_prod or settings.REQUIRE_API_KEY) and not settings.API_KEY:
+        logger.error("Security configuration error: mutating endpoint called but API_KEY is unset in production mode.")
+        raise HTTPException(
+            status_code=500,
+            detail="Server security misconfiguration: API_KEY must be configured in production environment.",
+        )
+
+    if settings.API_KEY:
+        if not credentials or credentials.credentials != settings.API_KEY:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Mutating operations require a valid 'Authorization: Bearer <API_KEY>' header.",
+            )
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -114,8 +142,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── MCP ASGI Auth Middleware ──────────────────────────────────────────────────
+class MCPAuthMiddleware:
+    """
+    ASGI middleware protecting the /mcp endpoint.
+    Enforces fail-closed security when running in production or when REQUIRE_API_KEY=true.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            is_prod = settings.ENVIRONMENT.lower() in ("production", "prod")
+            if (is_prod or settings.REQUIRE_API_KEY) and not settings.API_KEY:
+                response = JSONResponse(
+                    status_code=500,
+                    content={"detail": "Server security misconfiguration: API_KEY must be configured in production environment."},
+                )
+                await response(scope, receive, send)
+                return
+
+            if settings.API_KEY:
+                headers = dict(scope.get("headers", []))
+                auth_header = headers.get(b"authorization", b"").decode("utf-8")
+                query_string = scope.get("query_string", b"").decode("utf-8")
+                authorized = False
+                if auth_header.startswith("Bearer "):
+                    token = auth_header[7:].strip()
+                    if token == settings.API_KEY:
+                        authorized = True
+                if not authorized and f"api_key={settings.API_KEY}" in query_string:
+                    authorized = True
+
+                if not authorized:
+                    response = JSONResponse(
+                        status_code=403,
+                        content={"detail": "Forbidden: MCP access requires valid API key credentials."},
+                    )
+                    await response(scope, receive, send)
+                    return
+
+        await self.app(scope, receive, send)
+
+
 # Mount MCP ASGI sub-application at /mcp
-app.mount("/mcp", mcp_asgi_app)
+app.mount("/mcp", MCPAuthMiddleware(mcp_asgi_app))
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
@@ -145,13 +216,33 @@ async def get_history(limit: int = 100) -> JSONResponse:
 
 @app.get("/api/health")
 async def health_check() -> HealthStatus:
-    """System health endpoint."""
+    """
+    System health endpoint with liveness, readiness, and component status distinction.
+    Reports 'ok' when fully operational, 'degraded' when running in fallback mode or starting.
+    """
     obs = state_store.get_observation()
+    sim_running = state_store.is_simulation_running()
+    llm_avail = state_store.is_llm_available()
+    mcp_running = state_store.is_mcp_running()
+    readiness = obs is not None and sim_running
+
+    if not sim_running:
+        overall_status = "degraded" if obs is not None else "starting"
+    elif not llm_avail:
+        overall_status = "degraded"  # autonomous control active in rule-based mode
+    else:
+        overall_status = "ok"
+
+    controller_mode = "llm" if llm_avail else "rule_based"
+
     return HealthStatus(
-        status="ok",
-        simulation_running=state_store.is_simulation_running(),
-        llm_available=state_store.is_llm_available(),
-        mcp_running=state_store.is_mcp_running(),
+        status=overall_status,
+        liveness=True,
+        readiness=readiness,
+        simulation_running=sim_running,
+        llm_available=llm_avail,
+        mcp_running=mcp_running,
+        controller_mode=controller_mode,
         uptime_seconds=round(time.monotonic() - _app_start_time, 1),
         simulation_mode=settings.SIMULATION_MODE,
         model=settings.LLM_MODEL,
@@ -159,31 +250,23 @@ async def health_check() -> HealthStatus:
     )
 
 
-@app.post("/api/setpoint")
+@app.post("/api/setpoint", dependencies=[Depends(verify_api_key)])
 async def manual_setpoint(cmd: SetpointCommand) -> JSONResponse:
     """Manual setpoint override. Validates safety constraints and applies setpoints."""
     if controller is None or controller.env is None:
         raise HTTPException(status_code=503, detail="Simulation environment not initialised.")
 
-    # Clamp setpoints to allowable ranges and enforce minimum deadband
-    cooling_c = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cmd.cooling))
-    heating_c = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, cmd.heating))
-    if cooling_c < heating_c + 1.5:
-        cooling_c = heating_c + 2.0
+    # Validation (ranges, deadband, zone name) is strictly enforced by SetpointCommand model validator
+    cooling_c = cmd.cooling
+    heating_c = cmd.heating
 
     if cmd.zone is not None:
-        if cmd.zone not in settings.ZONES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unknown zone '{cmd.zone}'. Valid: {settings.ZONES}",
-            )
-        ok = await controller.env.set_setpoint(cmd.zone, cooling_c, heating_c)
+        ok = await controller.set_zone_setpoint(cmd.zone, cooling_c, heating_c)
         message = f"Setpoint applied to {cmd.zone}." if ok else "Failed to apply setpoint."
         zone_applied = cmd.zone
     else:
-        await controller.env.set_all_setpoints(cooling_c, heating_c)
-        ok = True
-        message = "Setpoints applied to all zones."
+        ok = await controller.set_all_zone_setpoints(cooling_c, heating_c)
+        message = "Setpoints applied to all zones." if ok else "Failed to apply setpoints."
         zone_applied = "ALL"
 
     return JSONResponse(
@@ -197,7 +280,23 @@ async def manual_setpoint(cmd: SetpointCommand) -> JSONResponse:
     )
 
 
-@app.post("/api/simulation/speed")
+@app.post("/api/simulation/reset", dependencies=[Depends(verify_api_key)])
+async def reset_simulation() -> JSONResponse:
+    """Reset the building simulation and parallel baseline to initial step 0 under lock."""
+    if controller is None or controller.env is None:
+        raise HTTPException(status_code=503, detail="Simulation environment not initialised.")
+    obs = await controller.reset_simulation()
+    return JSONResponse(
+        content={
+            "success": True,
+            "message": "Simulation and reference baseline reset to initial step 0.",
+            "timestep": obs.timestep,
+            "simulation_time": obs.simulation_time.isoformat(),
+        }
+    )
+
+
+@app.post("/api/simulation/speed", dependencies=[Depends(verify_api_key)])
 async def set_speed(speedup: float) -> JSONResponse:
     """
     Adjust simulation speedup factor (demo/local control).

@@ -111,3 +111,65 @@ async def test_agent_successful_mock_call(sample_observation):
         assert decision.energy_mode == "eco"
         assert decision.confidence == pytest.approx(0.88)
         assert decision.zone_setpoints["Core"].cooling == 25.0
+        assert decision.controller_source == "llm"
+
+
+@pytest.mark.asyncio
+async def test_llm_missing_model_detection(sample_observation):
+    """Verify missing model in Ollama model list sets available=False and source=rule_based."""
+    agent = BuildingAIAgent()
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_ollama_async_client = MagicMock()
+    mock_model_obj = MagicMock()
+    mock_model_obj.model = "different-model:latest"
+    mock_ollama_async_client.list = AsyncMock(return_value=MagicMock(models=[mock_model_obj]))
+
+    with patch("ollama.AsyncClient", return_value=mock_ollama_async_client):
+        is_avail = await agent.check_availability(force=True)
+        assert is_avail is False
+        assert agent.is_available is False
+
+        decision = await agent.analyze_and_decide(sample_observation)
+        assert decision.controller_source == "rule_based"
+        assert "[Rule-based]" in decision.reasoning
+
+
+@pytest.mark.asyncio
+async def test_llm_recovery_when_model_installed(sample_observation):
+    """Verify agent automatically recovers to available=True when model becomes present."""
+    agent = BuildingAIAgent()
+    agent._available = False
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_ollama_async_client = MagicMock()
+    mock_model_obj = MagicMock()
+    mock_model_obj.model = settings.LLM_MODEL
+    mock_ollama_async_client.list = AsyncMock(return_value=MagicMock(models=[mock_model_obj]))
+
+    with patch("ollama.AsyncClient", return_value=mock_ollama_async_client):
+        is_avail = await agent.check_availability(force=True)
+        assert is_avail is True
+        assert agent.is_available is True
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_triggers_rule_based_fallback(sample_observation):
+    """Verify timeout during Ollama chat triggers fallback and attribution=rule_based."""
+    agent = BuildingAIAgent()
+    agent._available = True
+    agent._timeout = 1
+
+    from unittest.mock import MagicMock
+    mock_async_client = MagicMock()
+
+    async def timeout_chat(*args, **kwargs):
+        raise asyncio.TimeoutError("Timeout in test")
+
+    mock_async_client.chat = timeout_chat
+
+    with patch("ollama.AsyncClient", return_value=mock_async_client):
+        decision = await agent.analyze_and_decide(sample_observation)
+        assert decision.controller_source == "rule_based"
+        assert "[Fallback]" in decision.reasoning
+        assert agent.is_available is False

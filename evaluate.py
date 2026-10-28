@@ -60,7 +60,7 @@ def _ollama_available() -> bool:
     """Return True if Ollama server is responsive."""
     try:
         import ollama
-        client = ollama.Client(host=settings.OLLAMA_HOST)
+        client = ollama.Client(host=settings.OLLAMA_HOST, timeout=2.0)
         client.list()
         return True
     except Exception:
@@ -154,6 +154,8 @@ async def run_scenario(
     total_zone_evals = 0
     successes = 0
     failures = 0
+    llm_calls_succeeded = 0
+    fallback_calls = 0
 
     for _ in range(steps):
         obs = await env.step()
@@ -166,16 +168,38 @@ async def run_scenario(
             successes += 1
         else:
             decision = None
-            if mode == "ai" and ollama_client is not None:
+            if fault_mode is not None:
+                # Explicit fault injection test
                 try:
-                    decision, llm_elapsed, _, _ = real_llm_call(obs, ollama_client, fault_mode=fault_mode)
+                    if fault_mode == "disconnect":
+                        import httpx
+                        raise httpx.ConnectError("Simulated LLM network disconnect")
+                    elif fault_mode == "timeout":
+                        raise TimeoutError("Simulated LLM request timeout (30s exceeded)")
+                    elif fault_mode == "corrupt":
+                        raise ValueError("Simulated corrupt JSON schema from model")
+                    elif ollama_client is not None:
+                        decision, llm_elapsed, _, _ = real_llm_call(obs, ollama_client, fault_mode=fault_mode)
+                        llm_times.append(llm_elapsed)
+                        llm_calls_succeeded += 1
+                        successes += 1
+                except Exception:
+                    failures += 1
+                    fallback_calls += 1
+                    decision = _rule_based_decision(obs)
+            elif mode == "ai" and ollama_client is not None:
+                try:
+                    decision, llm_elapsed, _, _ = real_llm_call(obs, ollama_client, fault_mode=None)
                     llm_times.append(llm_elapsed)
+                    llm_calls_succeeded += 1
                     successes += 1
                 except Exception:
                     failures += 1
+                    fallback_calls += 1
                     decision = _rule_based_decision(obs)
             else:
                 decision = _rule_based_decision(obs)
+                fallback_calls += 1
                 successes += 1
 
             if decision is not None:
@@ -196,10 +220,25 @@ async def run_scenario(
             if abs(z.pmv_score) <= 0.5:
                 in_comfort_count += 1
 
+    # Accurate controller attribution
+    if is_baseline:
+        controller_name = "Fixed Baseline (22/21°C)"
+    elif mode == "rule_based" or ollama_client is None:
+        controller_name = "Rule-Based Dynamic Controller"
+    elif llm_calls_succeeded > 0 and fallback_calls == 0:
+        controller_name = f"LLM ({settings.LLM_MODEL})"
+    elif llm_calls_succeeded > 0 and fallback_calls > 0:
+        controller_name = f"Mixed ({llm_calls_succeeded} LLM, {fallback_calls} Fallback)"
+    else:
+        controller_name = "Rule-Based Fallback (Ollama Offline)"
+
     return {
         "mode": mode,
         "seed": seed,
         "steps": steps,
+        "controller_name": controller_name,
+        "llm_calls_succeeded": llm_calls_succeeded,
+        "fallback_calls": fallback_calls,
         "total_energy_kwh": energy_history[-1],
         "peak_demand_kw": max(power_history) if power_history else 0.0,
         "energy_history": energy_history,
@@ -264,26 +303,42 @@ async def main():
     parser = argparse.ArgumentParser(description="EcoLoop Evaluation Harness")
     parser.add_argument("--steps", type=int, default=96, help="Simulation steps (96 = 24h at 15m/step)")
     parser.add_argument("--seeds", type=str, default="42,101,2024", help="Comma-separated random seeds")
+    parser.add_argument("--mode", type=str, default="rule_based", choices=["rule_based", "ai", "auto"],
+                        help="Controller to evaluate: 'rule_based' (deterministic), 'ai' (live LLM), 'auto' (detect)")
     parser.add_argument("--output", type=str, default="evaluation_report.md", help="Markdown output file")
     args = parser.parse_args()
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
     steps = args.steps
     output_file = args.output
+    eval_mode = args.mode
 
     print("=" * 65)
     print("  Honeywell Eco-Loop — Empirical Evaluation Harness")
-    print(f"  Configuration: {steps} steps (24h) | Seeds: {seeds}")
+    print(f"  Configuration: {steps} steps (24h) | Seeds: {seeds} | Mode: {eval_mode}")
     print("=" * 65)
 
     ollama_up = _ollama_available()
     ollama_client = None
-    if ollama_up:
-        import ollama as _ollama
-        ollama_client = _ollama.Client(host=settings.OLLAMA_HOST)
-        print(f"[OK] Ollama reachable at {settings.OLLAMA_HOST} — Model: {settings.LLM_MODEL}")
+
+    if eval_mode == "ai" or (eval_mode == "auto" and ollama_up):
+        try:
+            import ollama as _ollama
+            ollama_client = _ollama.Client(host=settings.OLLAMA_HOST, timeout=5.0)
+            models = [m.model for m in ollama_client.list().models]
+            if settings.LLM_MODEL in models or any(settings.LLM_MODEL in m for m in models):
+                print(f"[OK] Ollama reachable at {settings.OLLAMA_HOST} — Verified model: {settings.LLM_MODEL}")
+            else:
+                print(f"[NOTE] Model '{settings.LLM_MODEL}' not in {models}. Using rule-based fallback.")
+                ollama_client = None
+                eval_mode = "rule_based"
+        except Exception as e:
+            print(f"[NOTE] Ollama connection check failed ({e}). Using rule-based fallback.")
+            ollama_client = None
+            eval_mode = "rule_based"
     else:
-        print(f"[NOTE] Ollama not reachable at {settings.OLLAMA_HOST}. Dynamic runs will use rule-based control.")
+        print("[INFO] Evaluating deterministic Rule-Based Dynamic Controller.")
+        eval_mode = "rule_based"
 
     # ── Multi-seed evaluation ────────────────────────────────────────────────
     multi_seed_results = []
@@ -295,8 +350,7 @@ async def main():
     for seed in seeds:
         print(f"\nEvaluating Seed {seed} ({steps} steps)...")
         base_res = await run_scenario("baseline", steps=steps, seed=seed)
-        ctrl_mode = "ai" if ollama_up else "rule_based"
-        ctrl_res = await run_scenario(ctrl_mode, steps=steps, seed=seed, ollama_client=ollama_client)
+        ctrl_res = await run_scenario(eval_mode, steps=steps, seed=seed, ollama_client=ollama_client)
 
         base_kwh = base_res["total_energy_kwh"]
         ctrl_kwh = ctrl_res["total_energy_kwh"]
@@ -370,6 +424,12 @@ async def main():
     plt.savefig("energy_comparison.png", dpi=150)
     plt.close()
 
+    active_ctrl_desc = (
+        "Rule-Based Dynamic Controller (Deterministic Algorithm)"
+        if eval_mode == "rule_based" or ollama_client is None
+        else f"Qwen2.5 LLM ({settings.LLM_MODEL} via Ollama)"
+    )
+
     # ── Save JSON raw results ────────────────────────────────────────────────
     raw_payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -377,12 +437,14 @@ async def main():
             "steps": steps,
             "seeds": seeds,
             "ollama_available": ollama_up,
+            "active_controller": active_ctrl_desc,
             "model": settings.LLM_MODEL,
             "co2_factor_kg_per_kwh": CO2_KG_PER_KWH,
             "baseline_setpoint_cooling": settings.BASELINE_SETPOINT_COOLING,
             "baseline_setpoint_heating": settings.BASELINE_SETPOINT_HEATING,
         },
         "aggregate_metrics": {
+            "active_controller": active_ctrl_desc,
             "mean_baseline_kwh": round(avg_base_kwh, 2),
             "mean_controlled_kwh": round(avg_ctrl_kwh, 2),
             "mean_savings_pct": round(avg_savings_pct, 2),
@@ -392,6 +454,9 @@ async def main():
         "runs": [
             {
                 "seed": r["seed"],
+                "controller_used": r["controlled"]["controller_name"],
+                "llm_calls_succeeded": r["controlled"]["llm_calls_succeeded"],
+                "fallback_calls": r["controlled"]["fallback_calls"],
                 "baseline_kwh": round(r["baseline"]["total_energy_kwh"], 2),
                 "controlled_kwh": round(r["controlled"]["total_energy_kwh"], 2),
                 "savings_pct": round(r["savings_pct"], 2),
@@ -410,12 +475,16 @@ async def main():
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("# Eco-Loop System Evaluation Report\n\n")
         f.write(f"> **Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  \n")
-        f.write(f"> **Evaluation Scope:** 1 Full Day ({steps} timesteps × 15 min) | Seeds: `{seeds}` | CO₂ Factor: {CO2_KG_PER_KWH} kg/kWh\n\n")
+        f.write(f"> **Evaluation Scope:** 1 Full Day ({steps} timesteps × 15 min) | Seeds: `{seeds}` | CO₂ Factor: {CO2_KG_PER_KWH} kg/kWh  \n")
+        f.write(f"> **Active Dynamic Controller Under Test:** `{active_ctrl_desc}`\n\n")
 
         f.write("## 1. Executive Summary & HVAC Performance\n\n")
         f.write("This evaluation measures the performance of the Eco-Loop autonomous controller against a true fixed-setpoint reference baseline (cooling 22.0°C, heating 21.0°C). Conditions are matched identically across random seeds.\n\n")
+        if not ollama_up:
+            f.write("> [!NOTE]\n> **Controller Attribution:** The Ollama inference host was offline during this evaluation run. The recorded metrics reflect the **Rule-Based Dynamic Controller** fallback path, which autonomously manages zone setpoints and deadbands based on thermal physics and occupancy schedules without calling an external LLM.\n\n")
 
         hvac_table = [
+            ["Active Dynamic Controller", active_ctrl_desc],
             ["Reference Baseline Energy (Mean)", f"{avg_base_kwh:.2f} kWh"],
             ["Eco-Loop Controlled Energy (Mean)", f"{avg_ctrl_kwh:.2f} kWh"],
             ["Measured Energy Savings (Mean ± Std)", f"{avg_savings_pct:.2f}% ± {std_savings:.2f}%"],
@@ -430,6 +499,7 @@ async def main():
         seed_rows = [
             [
                 r["seed"],
+                r["controlled"]["controller_name"],
                 f"{r['baseline']['total_energy_kwh']:.2f}",
                 f"{r['controlled']['total_energy_kwh']:.2f}",
                 f"{r['savings_pct']:+.1f}%",
@@ -439,7 +509,7 @@ async def main():
             ]
             for r in multi_seed_results
         ]
-        f.write(tabulate(seed_rows, headers=["Seed", "Baseline (kWh)", "Controlled (kWh)", "Savings (%)", "Peak Red. (%)", "Mean PMV", "Comfort (%)"], tablefmt="github") + "\n\n")
+        f.write(tabulate(seed_rows, headers=["Seed", "Controller Mode", "Baseline (kWh)", "Controlled (kWh)", "Savings (%)", "Peak Red. (%)", "Mean PMV", "Comfort (%)"], tablefmt="github") + "\n\n")
 
         f.write("## 2. MCP Tool Performance (10 Registered Tools)\n\n")
         mcp_table = [[r["name"], f"{r['time_ms']:.3f} ms", r["status"]] for r in mcp_results]

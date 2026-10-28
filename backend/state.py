@@ -148,6 +148,27 @@ class BuildingStateStore:
             entries = list(self._history)
         return entries[-limit:]
 
+    # ── State Mutation Helpers ───────────────────────────────────────────────
+
+    def update_setpoint(self, zone: str, cooling: float, heating: float) -> None:
+        """Immediately update setpoints on the cached observation if present."""
+        with self._lock:
+            if self._observation is not None and zone in self._observation.zones:
+                z = self._observation.zones[zone]
+                self._observation.zones[zone] = z.model_copy(
+                    update={"setpoint_cooling": cooling, "setpoint_heating": heating}
+                )
+        self._notify()
+
+    def reset(self) -> None:
+        """Clear historical ring-buffer and accumulated energy metrics."""
+        with self._lock:
+            self._history.clear()
+            self._baseline_energy_kwh = 0.0
+            self._peak_demand_kw = 0.0
+            self._decision = None
+        self._notify()
+
     def is_simulation_running(self) -> bool:
         with self._lock:
             return self._simulation_running
@@ -189,7 +210,7 @@ class BuildingStateStore:
             energy_savings_pct=round(savings_pct, 2),
             baseline_energy_kwh=round(baseline_kwh, 3),
             current_energy_kwh=round(obs.total_energy_kwh, 3),
-            co2_saved_kg=round(max(0.0, co2_saved), 3),
+            co2_saved_kg=round(co2_saved, 3),
             peak_demand_kw=round(self._peak_demand_kw, 2),
             avg_temp_c=round(obs.avg_temperature, 2),
             baseline_mode=baseline_mode,

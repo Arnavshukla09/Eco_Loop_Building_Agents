@@ -7,11 +7,12 @@ import EnergyChart from './components/EnergyChart';
 import ComfortGauge from './components/ComfortGauge';
 import ZoneGrid from './components/ZoneGrid';
 import SavingsCounter from './components/SavingsCounter';
-import { Building2, Zap, Percent, TreePine, Thermometer, WifiOff, Wifi, Clock, Bot } from 'lucide-react';
+import SetpointControl from './components/SetpointControl';
+import { Building2, Zap, Percent, TreePine, Thermometer, WifiOff, Wifi, Clock, Bot, Cpu, AlertTriangle } from 'lucide-react';
 import { format } from 'date-fns';
 
 export default function App() {
-  const { data, isConnected, lastUpdate } = useWebSocket();
+  const { data, isConnected, isStale, lastUpdate } = useWebSocket();
   const [history, setHistory] = useState([]);
 
   useEffect(() => {
@@ -58,18 +59,46 @@ export default function App() {
   }
 
   const { building, ai_decision, metrics, simulation_mode } = data;
+  const isLLMActive = ai_decision?.controller_source === 'llm';
 
   return (
     <div className="min-h-screen bg-brand-navy text-gray-200 p-4 md:p-6 lg:p-8 font-sans selection:bg-brand-orange/30">
       
+      {/* Telemetry Stall or Disconnect Alert Banner */}
+      {!isConnected && (
+        <div className="mb-4 p-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-200 text-xs flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <WifiOff size={16} className="text-red-400" />
+            <strong>Disconnected from building server:</strong> Retrying connection in background...
+          </span>
+          <span className="font-mono text-[11px] text-red-300">Offline</span>
+        </div>
+      )}
+      {isConnected && isStale && (
+        <div className="mb-4 p-2.5 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-200 text-xs flex items-center gap-2">
+          <AlertTriangle size={15} className="text-yellow-400" />
+          <span>Telemetry update delay: Displaying last received sensor state (last heartbeat: {lastUpdate ? format(lastUpdate, 'HH:mm:ss') : '--'}).</span>
+        </div>
+      )}
+
       <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
         <div className="flex items-center gap-3">
           <div className="bg-brand-orange p-2 rounded-lg text-white shadow-[0_0_15px_rgba(255,107,26,0.5)]">
             <Building2 size={28} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-white tracking-tight">Eco-Loop Building Agent</h1>
-            <p className="text-sm text-gray-400">Honeywell Automated Control</p>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-white tracking-tight">Eco-Loop Building Agent</h1>
+              <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded flex items-center gap-1 ${
+                isLLMActive 
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' 
+                  : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+              }`}>
+                {isLLMActive ? <Bot size={11} /> : <Cpu size={11} />}
+                {isLLMActive ? 'Qwen2.5 LLM' : 'Rule-Based Fallback'}
+              </span>
+            </div>
+            <p className="text-sm text-gray-400">Autonomous Physical AI & HVAC Optimization</p>
           </div>
         </div>
         
@@ -163,7 +192,11 @@ export default function App() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <ZoneGrid zones={building.zones} />
+            <SetpointControl 
+              currentSetpoints={building.zones} 
+              isConnected={isConnected} 
+              onResetSuccess={() => setHistory([])} 
+            />
           </div>
           <div className="lg:col-span-1">
             <SavingsCounter 
@@ -173,6 +206,10 @@ export default function App() {
               baselineEnergy={metrics.baseline_energy_kwh}
             />
           </div>
+        </div>
+
+        <div className="w-full">
+          <ZoneGrid zones={building.zones} />
         </div>
       </main>
 

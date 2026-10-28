@@ -23,7 +23,7 @@ from typing import Optional
 
 from backend.energyplus_runner import BuildingEnvironment, SimulatedBuildingEnvironment, create_environment
 from backend.llm_agent import agent
-from backend.models import AgentDecision, BuildingObservation
+from backend.models import AgentDecision, BuildingObservation, validate_setpoints
 from backend.state import state_store
 from config.settings import settings
 
@@ -47,6 +47,13 @@ class AutonomousController:
         self._agent_task: Optional[asyncio.Task] = None
         self._step_count  = 0
         self._agent_count = 0
+        self._step_lock: Optional[asyncio.Lock] = None
+
+    @property
+    def step_lock(self) -> asyncio.Lock:
+        if self._step_lock is None:
+            self._step_lock = asyncio.Lock()
+        return self._step_lock
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -77,7 +84,7 @@ class AutonomousController:
             self._agent_loop(), name="agent-loop"
         )
 
-        step_wall_time = settings.TIMESTEP_MINUTES * 60.0 / settings.SPEEDUP_FACTOR
+        step_wall_time = settings.TIMESTEP_MINUTES * 60.0 / max(1.0, settings.SPEEDUP_FACTOR)
         logger.info(
             "Controller started. Sim interval: %.2f s wall-clock per step (%.0f min simulated, ×%.1f speedup). "
             "Agent interval: %.0f s.",
@@ -100,6 +107,29 @@ class AutonomousController:
         state_store.set_simulation_running(False)
         logger.info("Controller stopped.")
 
+    # ── Safe Single-Owner Simulation Step ──────────────────────────────────────
+
+    async def step_simulation(self) -> BuildingObservation:
+        """
+        Safely advance the active simulation and parallel baseline by one timestep.
+        Guarded by step_lock to prevent concurrent execution races from the controller
+        loop, external MCP calls, and API commands.
+        """
+        async with self.step_lock:
+            if self.env is None:
+                raise RuntimeError("Simulation environment not initialised.")
+
+            obs = await self.env.step()
+            if self.baseline_env is not None:
+                try:
+                    base_obs = await self.baseline_env.step()
+                    state_store.update_baseline_energy(base_obs.total_energy_kwh)
+                except Exception as base_exc:
+                    logger.warning("Baseline reference step failed: %s", base_exc)
+            state_store.update_observation(obs)
+            self._step_count += 1
+            return obs
+
     # ── Simulation loop ────────────────────────────────────────────────────────
 
     async def _simulation_loop(self) -> None:
@@ -107,27 +137,19 @@ class AutonomousController:
         Advances the simulation one timestep at a time.
 
         Sleep between steps = TIMESTEP_MINUTES / SPEEDUP_FACTOR seconds.
-        Default: 15 min / 60 = 0.25 s per step → 1 simulated day ≈ 6 s wall-clock.
+        Recalculated every iteration to immediately reflect runtime speed adjustments.
         """
-        step_wall_time = settings.TIMESTEP_MINUTES * 60.0 / settings.SPEEDUP_FACTOR
         logger.info(
-            "Simulation loop running (%.2f s per %.0f-min timestep).",
-            step_wall_time,
-            settings.TIMESTEP_MINUTES,
+            "Simulation loop running (initial speedup: %.1fx).",
+            settings.SPEEDUP_FACTOR,
         )
 
         while self._running:
             try:
-                t0  = time.monotonic()
-                obs = await self.env.step()
-                if self.baseline_env is not None:
-                    try:
-                        base_obs = await self.baseline_env.step()
-                        state_store.update_baseline_energy(base_obs.total_energy_kwh)
-                    except Exception as base_exc:
-                        logger.warning("Baseline reference step failed: %s", base_exc)
-                state_store.update_observation(obs)
-                self._step_count += 1
+                t0 = time.monotonic()
+                step_wall_time = settings.TIMESTEP_MINUTES * 60.0 / max(1.0, settings.SPEEDUP_FACTOR)
+
+                obs = await self.step_simulation()
 
                 if self._step_count % 96 == 0:   # log every simulated day
                     logger.info(
@@ -210,13 +232,70 @@ class AutonomousController:
                 logger.exception("Agent loop error: %s", exc)
                 await asyncio.sleep(5.0)
 
-    async def _apply_decision(self, decision: AgentDecision) -> None:
-        """Push each zone's setpoints from the decision to the environment."""
-        applied = 0
-        for zone, sp in decision.zone_setpoints.items():
-            ok = await self.env.set_setpoint(zone, sp.cooling, sp.heating)
+    async def set_zone_setpoint(self, zone: str, cooling: float, heating: float) -> bool:
+        """Safely update setpoints for a single zone with lock protection and canonical validation."""
+        try:
+            validate_setpoints(cooling, heating, zone)
+        except ValueError as exc:
+            logger.warning("Rejected invalid setpoint for %s (cool=%.1f, heat=%.1f): %s", zone, cooling, heating, exc)
+            return False
+
+        async with self.step_lock:
+            if self.env is None:
+                return False
+            ok = await self.env.set_setpoint(zone, cooling, heating)
             if ok:
-                applied += 1
+                state_store.update_setpoint(zone, cooling, heating)
+            return ok
+
+    async def set_all_zone_setpoints(self, cooling: float, heating: float) -> bool:
+        """Safely update setpoints for all zones with lock protection and canonical validation."""
+        try:
+            validate_setpoints(cooling, heating, None)
+        except ValueError as exc:
+            logger.warning("Rejected invalid setpoints for all zones (cool=%.1f, heat=%.1f): %s", cooling, heating, exc)
+            return False
+
+        async with self.step_lock:
+            if self.env is None:
+                return False
+            await self.env.set_all_setpoints(cooling, heating)
+            for z in settings.ZONES:
+                state_store.update_setpoint(z, cooling, heating)
+            return True
+
+    async def reset_simulation(self) -> BuildingObservation:
+        """
+        Safely reset both active simulation and parallel baseline to step 0.
+        Guarded by step_lock to prevent race conditions with background loops.
+        """
+        async with self.step_lock:
+            self.env = create_environment()
+            if isinstance(self.env, SimulatedBuildingEnvironment):
+                self.baseline_env = SimulatedBuildingEnvironment(is_baseline=True)
+            self._step_count = 0
+            self._agent_count = 0
+            state_store.reset()
+            obs = await self.env.step()
+            if self.baseline_env is not None:
+                try:
+                    base_obs = await self.baseline_env.step()
+                    state_store.update_baseline_energy(base_obs.total_energy_kwh)
+                except Exception:
+                    pass
+            state_store.update_observation(obs)
+            return obs
+
+    async def _apply_decision(self, decision: AgentDecision) -> None:
+        """Push each zone's setpoints from the decision to the environment under step_lock."""
+        applied = 0
+        async with self.step_lock:
+            for zone, sp in decision.zone_setpoints.items():
+                if self.env is not None:
+                    ok = await self.env.set_setpoint(zone, sp.cooling, sp.heating)
+                    if ok:
+                        state_store.update_setpoint(zone, sp.cooling, sp.heating)
+                        applied += 1
         logger.info(
             "Applied setpoints for %d/%d zones. Mode: %s, Fan: %s.",
             applied,

@@ -78,6 +78,22 @@ def test_unmeasured_baseline_labels_correctly(test_store, sample_obs):
     assert metrics.energy_savings_pct == 0.0
 
 
+def test_negative_energy_savings(test_store, sample_obs):
+    """Verify negative energy savings and emissions penalty when consumption exceeds baseline."""
+    # Baseline used 80 kWh, AI used 100 kWh
+    test_store.update_baseline_energy(80.0)
+    test_store.update_observation(sample_obs)
+
+    metrics = test_store.get_metrics()
+    assert metrics is not None
+    assert metrics.baseline_mode == "measured"
+    # Savings: (80 - 100) / 80 * 100 = -25.0%
+    assert metrics.energy_savings_pct == pytest.approx(-25.0, abs=0.01)
+    # CO2 saved: -20 * 0.386 = -7.72 kg (emissions penalty)
+    expected_co2 = -20.0 * CO2_KG_PER_KWH
+    assert metrics.co2_saved_kg == pytest.approx(expected_co2, abs=0.01)
+
+
 def test_history_max_length(test_store, sample_obs):
     """Verify history deque honors maximum length."""
     for i in range(10):

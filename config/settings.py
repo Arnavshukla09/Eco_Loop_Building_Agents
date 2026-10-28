@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
         description="URL of the local Ollama server.",
     )
     LLM_MODEL: str = Field(
-        default="qwen2.5:7b",
+        default="qwen2.5:1.5b",
         description="Ollama model tag to use for AI decisions.",
     )
     LLM_TEMPERATURE: float = Field(
@@ -109,8 +109,20 @@ class Settings(BaseSettings):
     MCP_PORT: int = Field(default=8001)
 
     # ── FastAPI / WebSocket ───────────────────────────────────────────────────
+    ENVIRONMENT: str = Field(
+        default="development",
+        description="Deployment environment: 'development', 'staging', or 'production'. In production, mutating operations fail-closed if API_KEY is unset.",
+    )
+    REQUIRE_API_KEY: bool = Field(
+        default=False,
+        description="Enforce API key authentication even when ENVIRONMENT is development.",
+    )
     API_HOST: str = Field(default="0.0.0.0")
     API_PORT: int = Field(default=8000)
+    API_KEY: Optional[str] = Field(
+        default=None,
+        description="Optional API key for mutating control endpoints. If set, requires 'Authorization: Bearer <key>'",
+    )
     CORS_ORIGINS: List[str] = Field(default=["*"])
     WS_BROADCAST_INTERVAL: float = Field(
         default=2.0,

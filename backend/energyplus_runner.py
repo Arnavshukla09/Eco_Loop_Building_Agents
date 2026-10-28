@@ -406,10 +406,15 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
         if zone not in ZONES:
             logger.warning("Unknown zone: %s", zone)
             return False
-        cooling = max(settings.COOLING_SETPOINT_MIN, min(settings.COOLING_SETPOINT_MAX, cooling))
-        heating = max(settings.HEATING_SETPOINT_MIN, min(settings.HEATING_SETPOINT_MAX, heating))
+        if cooling < settings.COOLING_SETPOINT_MIN or cooling > settings.COOLING_SETPOINT_MAX:
+            logger.warning("Cooling setpoint %.1f outside valid range [%.1f, %.1f]", cooling, settings.COOLING_SETPOINT_MIN, settings.COOLING_SETPOINT_MAX)
+            return False
+        if heating < settings.HEATING_SETPOINT_MIN or heating > settings.HEATING_SETPOINT_MAX:
+            logger.warning("Heating setpoint %.1f outside valid range [%.1f, %.1f]", heating, settings.HEATING_SETPOINT_MIN, settings.HEATING_SETPOINT_MAX)
+            return False
         if cooling < heating + 1.5:
-            cooling = heating + 2.0
+            logger.warning("Deadband violation: cooling (%.1f) must be >= heating (%.1f) + 1.5", cooling, heating)
+            return False
         with self._lock:
             self._sp_cool[zone] = cooling
             self._sp_heat[zone] = heating

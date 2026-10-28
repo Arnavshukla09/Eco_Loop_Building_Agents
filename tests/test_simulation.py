@@ -103,3 +103,147 @@ def test_timing_and_speedup_calculations():
     fast_speedup = 3600.0
     fast_wall_seconds = (ts_min * 60.0) / fast_speedup
     assert fast_wall_seconds == 0.25
+
+
+@pytest.mark.asyncio
+async def test_controller_step_simulation_lock():
+    """Verify controller.step_simulation safely synchronizes concurrent step requests."""
+    import asyncio
+    from backend.controller import AutonomousController
+
+    ctrl = AutonomousController()
+    ctrl.env = SimulatedBuildingEnvironment(seed=42)
+    ctrl.baseline_env = SimulatedBuildingEnvironment(is_baseline=True, seed=42)
+
+    # Launch 5 concurrent step requests
+    results = await asyncio.gather(*[ctrl.step_simulation() for _ in range(5)])
+    assert len(results) == 5
+    # Timesteps should be sequentially incremented without skipping or racing
+    timesteps = [r.timestep for r in results]
+    assert sorted(timesteps) == [1, 2, 3, 4, 5]
+    assert ctrl._step_count == 5
+
+
+@pytest.mark.asyncio
+async def test_controller_setpoints_and_reset_lock():
+    """Verify setpoints and reset operations execute safely under lock without touching baseline."""
+    from backend.controller import AutonomousController
+
+    ctrl = AutonomousController()
+    ctrl.env = SimulatedBuildingEnvironment(seed=42)
+    ctrl.baseline_env = SimulatedBuildingEnvironment(is_baseline=True, seed=42)
+
+    # Initial step
+    await ctrl.step_simulation()
+
+    # Safely set setpoint on Core zone
+    ok = await ctrl.set_zone_setpoint("Core", 25.0, 19.0)
+    assert ok is True
+    assert ctrl.env._sp_cool["Core"] == 25.0
+    assert ctrl.env._sp_heat["Core"] == 19.0
+
+    # Baseline environment must NOT have been changed
+    assert ctrl.baseline_env._sp_cool["Core"] == 22.0
+    assert ctrl.baseline_env._sp_heat["Core"] == 21.0
+
+    # Reset simulation
+    reset_obs = await ctrl.reset_simulation()
+    assert reset_obs.timestep == 1
+    assert ctrl._step_count == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_simulation_steps_and_mutations():
+    """Verify concurrent step requests, setpoint changes, and queries execute without data races."""
+    import asyncio
+    from backend.controller import AutonomousController
+
+    ctrl = AutonomousController()
+    ctrl.env = SimulatedBuildingEnvironment(seed=99)
+    ctrl.baseline_env = SimulatedBuildingEnvironment(is_baseline=True, seed=99)
+
+    async def worker_steps():
+        for _ in range(4):
+            await ctrl.step_simulation()
+            await asyncio.sleep(0.01)
+
+    async def worker_setpoints():
+        for _ in range(4):
+            await ctrl.set_zone_setpoint("Perimeter_N", 25.0, 19.0)
+            await asyncio.sleep(0.01)
+
+    async def worker_all_setpoints():
+        for _ in range(2):
+            await ctrl.set_all_zone_setpoints(24.5, 20.0)
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(worker_steps(), worker_setpoints(), worker_all_setpoints())
+    assert ctrl._step_count == 4
+    assert ctrl.env._sp_cool["Perimeter_N"] in (24.5, 25.0)
+
+
+@pytest.mark.asyncio
+async def test_reset_during_simulation():
+    """Verify reset_simulation cleanly resets step counter, baseline, and state while running."""
+    from backend.controller import AutonomousController
+    from backend.state import state_store
+
+    ctrl = AutonomousController()
+    ctrl.env = SimulatedBuildingEnvironment(seed=77)
+    ctrl.baseline_env = SimulatedBuildingEnvironment(is_baseline=True, seed=77)
+
+    # Step forward 5 steps
+    for _ in range(5):
+        await ctrl.step_simulation()
+
+    assert ctrl._step_count == 5
+    assert state_store.get_observation().timestep == 5
+
+    # Reset
+    obs = await ctrl.reset_simulation()
+    assert ctrl._step_count == 0
+    assert obs.timestep == 1
+    new_obs = state_store.get_observation()
+    assert new_obs.timestep == 1
+
+
+def test_negative_energy_savings_unclamped():
+    """Verify energy savings and CO2 calculations reflect negative savings when HVAC exceeds baseline."""
+    from backend.state import BuildingStateStore
+    from backend.models import BuildingObservation, ZoneState
+
+    store = BuildingStateStore()
+    zones = {
+        z: ZoneState(
+            zone_id=z,
+            temperature=22.0,
+            setpoint_cooling=24.0,
+            setpoint_heating=20.0,
+            pmv_score=0.0,
+            ppd_score=5.0,
+            humidity=50.0,
+        )
+        for z in settings.ZONES
+    }
+    # Simulated run consumed 120 kWh, but baseline consumed only 100 kWh (over-consumption)
+    obs = BuildingObservation(
+        timestamp=datetime.now(),
+        simulation_time=datetime(2024, 1, 15, 12, 0),
+        zones=zones,
+        outdoor_temp=10.0,
+        outdoor_humidity=60.0,
+        total_energy_kwh=120.0,
+        hvac_power_kw=15.0,
+        occupancy=0.5,
+        timestep=10,
+    )
+    store.update_baseline_energy(100.0)
+    store.update_observation(obs)
+
+    metrics = store.get_metrics()
+    assert metrics is not None
+    # Savings should be negative: (100 - 120) / 100 = -20.0%
+    assert metrics.energy_savings_pct == pytest.approx(-20.0, abs=0.1)
+    # CO2 saved should also be negative: (100 - 120) * 0.4 = -8.0 kg (not clamped to 0)
+    assert metrics.co2_saved_kg < 0.0
+    assert metrics.co2_saved_kg == pytest.approx(-7.72, abs=0.01)

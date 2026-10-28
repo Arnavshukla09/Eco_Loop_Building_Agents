@@ -17,12 +17,26 @@ export function useWebSocket(url) {
   const [isConnected, setIsConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [reconnectCount, setReconnectCount] = useState(0);
+  const [isStale, setIsStale] = useState(false);
   
   const ws = useRef(null);
   const reconnectTimeout = useRef(null);
   const pingInterval = useRef(null);
   const reconnectCountRef = useRef(0);
   const isUnmounted = useRef(false);
+
+  // Periodically check if telemetry has stalled (>10 seconds without updates)
+  useEffect(() => {
+    const staleInterval = setInterval(() => {
+      if (lastUpdate) {
+        const elapsed = Date.now() - new Date(lastUpdate).getTime();
+        setIsStale(elapsed > 10000 || !isConnected);
+      } else {
+        setIsStale(!isConnected);
+      }
+    }, 2000);
+    return () => clearInterval(staleInterval);
+  }, [lastUpdate, isConnected]);
 
   const connect = useCallback(() => {
     if (isUnmounted.current) return;
@@ -42,7 +56,7 @@ export function useWebSocket(url) {
         if (pingInterval.current) clearInterval(pingInterval.current);
         pingInterval.current = setInterval(() => {
           if (ws.current?.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({ type: 'ping' }));
+            ws.current.send('ping');
           }
         }, 20000);
       };
@@ -51,9 +65,11 @@ export function useWebSocket(url) {
         if (isUnmounted.current) return;
         try {
           const parsed = JSON.parse(event.data);
-          if (parsed.type === 'state_update') {
+          // Accept explicit state_update, or payloads containing standard building snapshot
+          if (parsed.type === 'state_update' || (parsed.building && parsed.metrics)) {
             setData(parsed);
             setLastUpdate(new Date());
+            setIsStale(false);
           }
         } catch (err) {
           console.error('Error parsing WS message:', err);
@@ -100,5 +116,5 @@ export function useWebSocket(url) {
     };
   }, [connect]);
 
-  return { data, isConnected, lastUpdate, reconnectCount };
+  return { data, isConnected, isStale, lastUpdate, reconnectCount };
 }

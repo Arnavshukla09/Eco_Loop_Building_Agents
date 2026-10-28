@@ -93,6 +93,10 @@ class ZoneSetpoint(BaseModel):
 class AgentDecision(BaseModel):
     """Structured decision returned by the AI agent for each control cycle."""
 
+    controller_source: str = Field(
+        default="rule_based",
+        description="Active controller: 'llm' (verified inference) or 'rule_based' (deterministic fallback)",
+    )
     zone_setpoints: Dict[str, ZoneSetpoint] = Field(
         description="Recommended heating/cooling setpoints per zone."
     )
@@ -173,6 +177,39 @@ class HistoryEntry(BaseModel):
     ai_energy_mode: Optional[str] = None
 
 
+# ── Setpoint Validation & Command ─────────────────────────────────────────────
+
+def validate_setpoints(cooling: float, heating: float, zone: Optional[str] = None) -> None:
+    """
+    Canonical setpoint validation across REST API, MCP tools, and autonomous control.
+    Enforces physical safety limits and ASHRAE minimum 1.5°C deadband.
+    Raises ValueError on validation failure.
+    """
+    from config.settings import settings
+
+    if zone is not None and zone not in settings.ZONES:
+        raise ValueError(f"Unknown zone '{zone}'. Valid zones: {settings.ZONES}")
+
+    if cooling < settings.COOLING_SETPOINT_MIN or cooling > settings.COOLING_SETPOINT_MAX:
+        raise ValueError(
+            f"Cooling setpoint {cooling:.1f}°C is outside valid range "
+            f"[{settings.COOLING_SETPOINT_MIN:.1f}°C, {settings.COOLING_SETPOINT_MAX:.1f}°C]."
+        )
+
+    if heating < settings.HEATING_SETPOINT_MIN or heating > settings.HEATING_SETPOINT_MAX:
+        raise ValueError(
+            f"Heating setpoint {heating:.1f}°C is outside valid range "
+            f"[{settings.HEATING_SETPOINT_MIN:.1f}°C, {settings.HEATING_SETPOINT_MAX:.1f}°C]."
+        )
+
+    deadband = cooling - heating
+    if deadband < 1.5:
+        raise ValueError(
+            f"Deadband constraint violated: cooling ({cooling:.1f}°C) must exceed "
+            f"heating ({heating:.1f}°C) by at least 1.5°C (current gap: {deadband:.1f}°C)."
+        )
+
+
 class SetpointCommand(BaseModel):
     """Manual setpoint override via REST API."""
 
@@ -180,23 +217,23 @@ class SetpointCommand(BaseModel):
         default=None,
         description="Zone to update (None = apply to all zones).",
     )
-    cooling: float = Field(..., ge=18.0, le=32.0, description="Cooling setpoint (°C)")
-    heating: float = Field(..., ge=10.0, le=25.0, description="Heating setpoint (°C)")
+    cooling: float = Field(..., description="Cooling setpoint (°C)")
+    heating: float = Field(..., description="Heating setpoint (°C)")
 
     @model_validator(mode="after")
-    def validate_deadband(self) -> "SetpointCommand":
-        if self.cooling < self.heating + 1.5:
-            raise ValueError(
-                f"Cooling setpoint ({self.cooling}°C) must be at least 1.5°C above heating setpoint ({self.heating}°C)"
-            )
+    def validate_canonical_limits(self) -> "SetpointCommand":
+        validate_setpoints(self.cooling, self.heating, self.zone)
         return self
 
 
 class HealthStatus(BaseModel):
-    status: str = "ok"
+    status: str = "ok"  # "ok", "degraded", "starting"
+    liveness: bool = True
+    readiness: bool = False
     simulation_running: bool
     llm_available: bool
     mcp_running: bool
+    controller_mode: str = "rule_based"  # "llm" or "rule_based"
     uptime_seconds: float
     simulation_mode: bool
     model: str

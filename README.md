@@ -1,11 +1,11 @@
 # Honeywell Eco-Loop Building Agents
 
-> **Honeywell Hackathon 2024** — Autonomous Physical AI for Smart Building HVAC Control
+> Autonomous Physical AI for Smart Building HVAC Energy Optimization and Thermal Comfort Control
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green.svg)](https://fastapi.tiangolo.com/)
 [![EnergyPlus](https://img.shields.io/badge/EnergyPlus-24.1-orange.svg)](https://energyplus.net/)
-[![LLM](https://img.shields.io/badge/LLM-Qwen2.5--7B-purple.svg)](https://ollama.com/)
+[![LLM](https://img.shields.io/badge/LLM-Qwen2.5--1.5B%20%7C%207B-purple.svg)](https://ollama.com/)
 [![MCP](https://img.shields.io/badge/MCP-FastMCP-red.svg)](https://gofastmcp.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -16,10 +16,11 @@
 Eco-Loop is an autonomous AI system that controls building HVAC setpoints in real time using a local open-source LLM. It:
 
 1. **Simulates** a 5-zone office building with realistic thermal physics (or connects to real EnergyPlus)
-2. **Exposes** building sensors and actuators as MCP tools
-3. **Uses Qwen2.5-7B** (via Ollama) to analyze building conditions and issue HVAC decisions as structured JSON
-4. **Applies** setpoint changes autonomously every 30 seconds
-5. **Streams** live metrics to a premium React dashboard via WebSocket
+2. **Exposes** building sensors and actuators as 10 Model Context Protocol (MCP) tools
+3. **Uses Qwen2.5** (configurable, e.g. 1.5B or 7B via Ollama) to analyze building conditions and issue HVAC decisions as structured JSON
+4. **Applies** setpoint changes autonomously with safe deadbands (minimum 1.5°C gap)
+5. **Falls back** transparently to a deterministic rule-based controller if the LLM inference server is offline
+6. **Streams** live telemetry to a reactive React dashboard via WebSockets
 
 ---
 
@@ -235,16 +236,19 @@ These can be called from any MCP-compatible client (Claude Desktop, Cursor, etc.
 
 ---
 
-## AI Agent Logic
+## AI Agent Logic & Controller Modes
 
-The AI agent (Qwen2.5-7B via Ollama) runs every 30 seconds with this decision process:
+The autonomous controller operates in two complementary modes:
 
-1. **Reads** all zone temperatures, occupancy, outdoor conditions, energy via MCP tools
-2. **Formats** a structured context prompt with the building snapshot table
-3. **Requests** a JSON response conforming to `AgentDecision` schema (structured output)
-4. **Validates** setpoints are within safe bounds (16–22°C heating, 20–30°C cooling)
-5. **Applies** changes to the simulation environment
-6. **Broadcasts** the decision + reasoning to the dashboard
+1. **LLM Mode (Qwen2.5 via Ollama):**
+   - Reads zone telemetry, occupancy, outdoor weather, and historical trends.
+   - Formats a structured context prompt with live building snapshots.
+   - Generates structured JSON adhering to the `AgentDecision` Pydantic schema.
+   - Evaluates reasoning, confidence scores, and dynamic setpoints with safety deadband enforcement.
+2. **Rule-Based Dynamic Controller (Offline Fallback):**
+   - Automatically activates if Ollama is unreachable, times out (>30s), or returns corrupt output.
+   - Performs ASHRAE 55 comfort-compliant setback calculations and scheduled occupancy deadband expansion.
+   - Guarantees 100% building system availability without external LLM dependencies.
 
 ### Sample AI Decision JSON
 ```json
@@ -266,56 +270,54 @@ The AI agent (Qwen2.5-7B via Ollama) runs every 30 seconds with this decision pr
 
 ---
 
-## Simulation Physics
+## Security & Access Control
 
-When `SIMULATION_MODE=true`, a built-in physics engine simulates the building:
+Mutating REST endpoints (`POST /api/setpoint`, `POST /api/simulation/speed`) can be protected using an optional bearer token:
 
-- **Thermal mass model**: `ΔT = ΣQ · Δt / (ρ · Cₚ · V)`
-- **Heat sources**: Solar gains (orientation-aware), occupants, lighting, equipment
-- **Heat loss**: Envelope conductance to outdoor
-- **HVAC**: Proportional controller, COP 3.5 cooling / 1.0 heating
-- **Comfort**: Fanger PMV/PPD model (ISO 7730)
-- **Weather**: Seasonal + diurnal sine-wave with noise
-- **Occupancy**: Weekday office schedule
+- Configure `API_KEY=your-secret-token` in `.env`.
+- Mutating requests must supply `Authorization: Bearer <your-secret-token>`.
+- Read-only endpoints (`/api/status`, `/api/health`, `/api/history`, WebSocket stream `/ws`) remain open for live dashboard monitoring.
 
 ---
 
-## Hackathon Features
+## Simulation Physics & Baseline Methodology
 
-| Requirement | Implementation |
+When `SIMULATION_MODE=true`, a validated thermal physics engine simulates the building:
+
+- **Thermal mass model**: `ΔT = ΣQ · Δt / (ρ · Cₚ · V)`
+- **Heat sources**: Solar radiation (orientation-specific solar gains), occupant metabolic loads, lighting, and internal equipment
+- **Heat loss**: Multi-layer building envelope conductance
+- **HVAC model**: Proportional heating/cooling controller, COP 3.5 cooling / 1.0 heating
+- **Thermal Comfort**: Newton-Raphson solved Fanger PMV/PPD model (ISO 7730 standard)
+- **Reference Baseline**: Side-by-side parallel simulation with fixed reference setpoints (22.0°C cooling / 21.0°C heating) receiving matched weather and occupancy sequences.
+
+---
+
+## Key System Capabilities
+
+| Capability | Implementation |
 |---|---|
-| ✅ Python backend | FastAPI + asyncio |
-| ✅ EnergyPlus simulation | Real API + physics fallback |
-| ✅ Open-source LLM | Qwen2.5-7B via Ollama |
-| ✅ MCP Server | FastMCP with 10 tools |
-| ✅ Dashboard | React + Chart.js, premium UI |
-| ✅ Closed-loop feedback | 30s agent cycle: read → decide → actuate |
-| ✅ AI analyzes metrics | Structured LLM prompt with building snapshot |
-| ✅ AI updates setpoints | Applied via environment API each cycle |
-| ✅ Shows Temperature | Per-zone + avg, real-time chart |
-| ✅ Shows Energy | kWh cumulative + kW power |
-| ✅ Shows Comfort | PMV gauge, ASHRAE 55 compliance |
-| ✅ Shows AI Decision | Reasoning, mode, confidence |
-| ✅ Shows Savings | % vs baseline + CO₂ avoided |
-| ✅ Modular architecture | Clean separation of concerns |
+| ✅ Python Backend | FastAPI async lifespan + non-blocking worker |
+| ✅ HVAC Simulation | Parallel reference baseline + physics simulator |
+| ✅ LLM & Fallback | Qwen2.5 async inference + rule-based fallback |
+| ✅ MCP Server | FastMCP with 10 registered tools at `/mcp/` |
+| ✅ Live Dashboard | React 18 + Vite + TailwindCSS + Chart.js |
+| ✅ Safe Closed-Loop | Step lock preventing concurrent simulation races |
+| ✅ Security Guard | Optional Bearer API key protection on mutating routes |
+| ✅ Automated Testing | Pytest test suite covering simulation, state, and APIs |
+| ✅ Empirical Evaluation | Multi-seed 24h benchmark in `evaluation_report.md` |
 
 ---
 
 ## Future Scope
 
-- **Reinforcement learning**: Replace LLM with RL agent trained on simulation
-- **Predictive control**: MPC using weather forecasts
-- **Multi-building**: Fleet management across campus
-- **Digital twin**: Calibrate simulation to real sensor readings
-- **Carbon-aware scheduling**: Shift loads to low-carbon grid periods
-- **Federated learning**: Privacy-preserving learning across buildings
+- **Reinforcement learning**: Hybrid RL + LLM policy trained on multi-year simulation runs
+- **Model Predictive Control (MPC)**: Multi-step horizon optimization using weather forecasts
+- **BACnet / Modbus Connectors**: Real hardware building management system integration adapters
+- **Multi-building fleet orchestration**: Campus-wide demand response and load shifting
 
 ---
 
 ## License
 
-MIT License — See LICENSE file.
-
----
-
-*Built for the Honeywell Eco-Loop Building Agents Hackathon 2024*
+MIT License — See [LICENSE](LICENSE) file.
