@@ -298,6 +298,11 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
         self._lock      = threading.RLock()
         self._ready     = True
 
+        # Fault injection & override handles
+        self._fault_injections: Dict[str, Optional[float]] = {}
+        self._weather_override: Optional[tuple[float, float]] = None
+        self._occupancy_override: Optional[float] = None
+
         logger.info(
             "SimulatedBuildingEnvironment initialised (timestep=%d min, baseline=%s).",
             self._ts_min,
@@ -311,6 +316,35 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
     def is_ready(self) -> bool:
         return self._ready
 
+    # ── Fault Injection & Anomaly Emulation ──────────────────────────────
+    def inject_sensor_fault(self, zone: str, value: Optional[float] = None) -> None:
+        """Inject a sensor anomaly (NaN, disconnect, or out-of-range value) into a zone."""
+        with self._lock:
+            self._fault_injections[zone] = value
+
+    def clear_sensor_fault(self, zone: str) -> None:
+        """Clear sensor fault injection for a zone."""
+        with self._lock:
+            self._fault_injections.pop(zone, None)
+
+    def inject_weather_override(self, temp: float, humidity: float = 50.0) -> None:
+        """Inject extreme outdoor temperature or humidity."""
+        with self._lock:
+            self._weather_override = (temp, humidity)
+
+    def clear_weather_override(self) -> None:
+        with self._lock:
+            self._weather_override = None
+
+    def inject_occupancy_override(self, occupancy: float) -> None:
+        """Inject sudden occupancy step changes."""
+        with self._lock:
+            self._occupancy_override = max(0.0, min(1.0, occupancy))
+
+    def clear_occupancy_override(self) -> None:
+        with self._lock:
+            self._occupancy_override = None
+
     async def step(self) -> BuildingObservation:
         """Advance one timestep using thermal-mass model."""
         await asyncio.sleep(0)   # yield to event loop
@@ -318,14 +352,44 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
             return self._step_sync()
 
     def _step_sync(self) -> BuildingObservation:
-        outdoor_temp, outdoor_hum = self._weather.get_conditions(self._sim_dt)
-        occupancy = self._occupancy.get(self._sim_dt)
+        if self._weather_override is not None:
+            outdoor_temp, outdoor_hum = self._weather_override
+        else:
+            outdoor_temp, outdoor_hum = self._weather.get_conditions(self._sim_dt)
+
+        if self._occupancy_override is not None:
+            occupancy = self._occupancy_override
+        else:
+            occupancy = self._occupancy.get(self._sim_dt)
 
         hvac_total_kw = 0.0
         zones: Dict[str, ZoneState] = {}
 
         for zone in ZONES:
-            temp    = self._temps[zone]
+            raw_temp = self._temps[zone]
+            is_fault = False
+            raw_val = None
+
+            # Check for simulated fault or physical sensor anomaly
+            if zone in self._fault_injections:
+                is_fault = True
+                fault_val = self._fault_injections[zone]
+                raw_val = fault_val
+                if fault_val is None or math.isnan(fault_val) or fault_val < 5.0 or fault_val > 45.0:
+                    # Impute using healthy zone mean
+                    healthy = [t for z, t in self._temps.items() if z not in self._fault_injections and 15.0 <= t <= 30.0]
+                    temp = sum(healthy) / len(healthy) if healthy else 21.5
+                    logger.warning("Sensor fault detected in %s (raw=%s). Imputed %.2f°C.", zone, fault_val, temp)
+                else:
+                    temp = fault_val
+            elif math.isnan(raw_temp) or raw_temp < 5.0 or raw_temp > 45.0:
+                is_fault = True
+                raw_val = raw_temp
+                temp = 21.5
+                logger.warning("Sensor anomaly in %s (raw=%.2f). Imputed 21.50°C.", zone, raw_temp)
+            else:
+                temp = raw_temp
+
             sp_cool = self._sp_cool[zone]
             sp_heat = self._sp_heat[zone]
             area    = ZONE_AREA[zone]
@@ -369,6 +433,11 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
 
             pmv, ppd = _pmv_ppd(self._temps[zone], zone_hum, met=1.1, clo=0.7)
 
+            # Format raw sensor reading if fault occurred
+            recorded_raw = None
+            if is_fault and raw_val is not None and not math.isnan(raw_val):
+                recorded_raw = round(float(raw_val), 2)
+
             zones[zone] = ZoneState(
                 zone_id=zone,
                 temperature=round(self._temps[zone], 2),
@@ -377,6 +446,8 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
                 pmv_score=round(pmv, 3),
                 ppd_score=round(ppd, 1),
                 humidity=round(zone_hum, 1),
+                sensor_fault=is_fault,
+                raw_temperature=recorded_raw,
             )
 
         # Cumulative energy

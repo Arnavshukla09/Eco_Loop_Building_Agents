@@ -276,24 +276,43 @@ class AutonomousController:
                 logger.exception("Agent loop error: %s", exc)
                 await asyncio.sleep(5.0)
 
-    async def set_zone_setpoint(self, zone: str, cooling: float, heating: float) -> bool:
-        """Safely update setpoints for a single zone with lock protection and canonical validation."""
+    def _clamp_setpoint_slew(self, zone: str, cooling: float, heating: float) -> tuple[float, float]:
+        """Apply 2°C/cycle slew-rate limit and ensure 1.5°C deadband against current setpoint."""
+        MAX_DELTA = 2.0
+        current_obs = state_store.get_observation()
+        target_cool = cooling
+        target_heat = heating
+        if current_obs and zone in current_obs.zones:
+            curr_z = current_obs.zones[zone]
+            target_cool = max(curr_z.setpoint_cooling - MAX_DELTA, min(curr_z.setpoint_cooling + MAX_DELTA, target_cool))
+            target_heat = max(curr_z.setpoint_heating - MAX_DELTA, min(curr_z.setpoint_heating + MAX_DELTA, target_heat))
+            if target_cool < target_heat + 1.5:
+                target_cool = min(settings.COOLING_SETPOINT_MAX, target_heat + 1.5)
+        return round(target_cool, 1), round(target_heat, 1)
+
+    async def set_zone_setpoint(self, zone: str, cooling: float, heating: float, force: bool = False) -> bool:
+        """Safely update setpoints for a single zone with lock protection, canonical validation, and slew-rate limiting."""
         try:
             validate_setpoints(cooling, heating, zone)
         except ValueError as exc:
             logger.warning("Rejected invalid setpoint for %s (cool=%.1f, heat=%.1f): %s", zone, cooling, heating, exc)
             return False
 
+        if not force:
+            target_cool, target_heat = self._clamp_setpoint_slew(zone, cooling, heating)
+        else:
+            target_cool, target_heat = round(cooling, 1), round(heating, 1)
+
         async with self.step_lock:
             if self.env is None:
                 return False
-            ok = await self.env.set_setpoint(zone, cooling, heating)
+            ok = await self.env.set_setpoint(zone, target_cool, target_heat)
             if ok:
-                state_store.update_setpoint(zone, cooling, heating)
+                state_store.update_setpoint(zone, target_cool, target_heat)
             return ok
 
-    async def set_all_zone_setpoints(self, cooling: float, heating: float) -> bool:
-        """Safely update setpoints for all zones with lock protection and canonical validation."""
+    async def set_all_zone_setpoints(self, cooling: float, heating: float, force: bool = False) -> bool:
+        """Safely update setpoints for all zones with lock protection, canonical validation, and slew-rate limiting."""
         try:
             validate_setpoints(cooling, heating, None)
         except ValueError as exc:
@@ -303,9 +322,13 @@ class AutonomousController:
         async with self.step_lock:
             if self.env is None:
                 return False
-            await self.env.set_all_setpoints(cooling, heating)
             for z in settings.ZONES:
-                state_store.update_setpoint(z, cooling, heating)
+                if not force:
+                    target_cool, target_heat = self._clamp_setpoint_slew(z, cooling, heating)
+                else:
+                    target_cool, target_heat = round(cooling, 1), round(heating, 1)
+                await self.env.set_setpoint(z, target_cool, target_heat)
+                state_store.update_setpoint(z, target_cool, target_heat)
             return True
 
     async def reset_simulation(self) -> BuildingObservation:
@@ -352,14 +375,15 @@ class AutonomousController:
             return obs
 
     async def _apply_decision(self, decision: AgentDecision) -> None:
-        """Push each zone's setpoints from the decision to the environment under step_lock."""
+        """Push each zone's setpoints from the decision to the environment under step_lock with slew-rate limiting."""
         applied = 0
         async with self.step_lock:
             for zone, sp in decision.zone_setpoints.items():
+                target_cool, target_heat = self._clamp_setpoint_slew(zone, sp.cooling, sp.heating)
                 if self.env is not None:
-                    ok = await self.env.set_setpoint(zone, sp.cooling, sp.heating)
+                    ok = await self.env.set_setpoint(zone, target_cool, target_heat)
                     if ok:
-                        state_store.update_setpoint(zone, sp.cooling, sp.heating)
+                        state_store.update_setpoint(zone, target_cool, target_heat)
                         applied += 1
 
         actuation_status = "applied" if applied == len(decision.zone_setpoints) else ("partial" if applied > 0 else "failed")

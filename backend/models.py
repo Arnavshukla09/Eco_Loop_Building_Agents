@@ -27,6 +27,8 @@ class ZoneState(BaseModel):
     pmv_score: float = Field(..., description="Predicted Mean Vote (-3 … +3, 0 = neutral)")
     ppd_score: float = Field(..., description="Predicted Percentage Dissatisfied (0–100 %)")
     humidity: float = Field(..., description="Relative humidity (%)")
+    sensor_fault: bool = Field(default=False, description="Flag indicating sensor dropout or reading anomaly")
+    raw_temperature: Optional[float] = Field(default=None, description="Original raw sensor reading before fault imputation")
 
     @computed_field
     @property

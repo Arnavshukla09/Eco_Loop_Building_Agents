@@ -19,7 +19,8 @@ export default function ZoneGrid({ zones }) {
     );
   }
 
-  const getStatus = (pmv) => {
+  const getStatus = (pmv, hasSensorFault) => {
+    if (hasSensorFault) return { label: 'Sensor Fault', color: 'bg-red-500/30 text-red-300 border-red-500/50 animate-pulse' };
     const absPmv = Math.abs(pmv);
     if (absPmv < 0.5) return { label: 'Optimal', color: 'bg-green-500/20 text-green-400 border-green-500/30' };
     if (absPmv < 1.0) return { label: 'Acceptable', color: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30' };
@@ -54,7 +55,7 @@ export default function ZoneGrid({ zones }) {
           </thead>
           <tbody className="divide-y divide-white/5 text-sm">
             {Object.entries(zones).map(([name, data], idx) => {
-              const status = getStatus(data.pmv_score);
+              const status = getStatus(data.pmv_score, data.sensor_fault);
               const isFlashing = flashingCells[name];
               
               return (
@@ -62,6 +63,11 @@ export default function ZoneGrid({ zones }) {
                   <td className="p-3 pl-4 font-medium text-gray-200">{name.replace('Perimeter_', 'P_')}</td>
                   <td className={`p-3 font-bold transition-colors duration-300 ${isFlashing ? 'text-white' : getTempColor(data.temperature, data.setpoint_heating, data.setpoint_cooling)}`}>
                     {data.temperature.toFixed(1)}
+                    {data.sensor_fault && data.raw_temperature != null && (
+                      <span className="block text-[10px] font-normal text-red-400 font-mono" title={`Raw sensor: ${data.raw_temperature}°C`}>
+                        raw: {data.raw_temperature.toFixed(1)}
+                      </span>
+                    )}
                   </td>
                   <td className="p-3 text-gray-300 font-mono">{data.setpoint_cooling.toFixed(1)}</td>
                   <td className="p-3 text-gray-300 font-mono">{data.setpoint_heating.toFixed(1)}</td>
