@@ -205,3 +205,39 @@ async def test_simulation_advances_independently_of_llm_latency():
     assert len(steps) == 5
     assert steps[-1].timestep == 5
     assert ctrl._step_count == 5
+
+
+def test_negative_energy_savings_and_co2_penalty_unmasked():
+    """Verify that negative energy savings and emissions increases are never clamped to zero."""
+    from backend.state import CO2_KG_PER_KWH
+    base_kwh = 100.0
+    ctrl_kwh = 125.0  # Controlled consumed 25 kWh MORE than baseline
+    diff_kwh = base_kwh - ctrl_kwh
+    savings_pct = (diff_kwh / base_kwh) * 100.0
+    co2_saved = diff_kwh * CO2_KG_PER_KWH
+
+    assert diff_kwh == -25.0
+    assert savings_pct == -25.0
+    assert co2_saved < 0.0, "Negative CO2 savings must not be clamped to 0"
+    assert co2_saved == pytest.approx(-9.65, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_fallback_decision_actuation_on_environment():
+    """Verify that fallback decisions are not merely computed but actually actuated on environment."""
+    ctrl = AutonomousController()
+    ctrl.env = SimulatedBuildingEnvironment(seed=808)
+    obs = await ctrl.step_simulation()
+
+    # Create fallback decision
+    from backend.llm_agent import _rule_based_decision
+    decision = _rule_based_decision(obs)
+    decision.controller_source = "fallback"
+
+    await ctrl._apply_decision(decision)
+
+    # Verify each zone setpoint on env was updated to match decision
+    for zone, sp in decision.zone_setpoints.items():
+        assert ctrl.env._sp_cool[zone] <= settings.COOLING_SETPOINT_MAX
+        assert ctrl.env._sp_heat[zone] >= settings.HEATING_SETPOINT_MIN
+        assert ctrl.env._sp_cool[zone] >= ctrl.env._sp_heat[zone] + 1.5

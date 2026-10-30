@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-10-29T04:43:03.139358+00:00",
+  "timestamp": "2026-10-29T07:23:35.586735+00:00",
   "configuration": {
     "steps": 96,
     "seeds": [
@@ -17,10 +17,21 @@
   "aggregate_metrics": {
     "active_controller": "Rule-Based Dynamic Controller (Deterministic Algorithm)",
     "mean_baseline_kwh": 142.39,
+    "std_baseline_kwh": 1.26,
     "mean_controlled_kwh": 77.43,
+    "std_controlled_kwh": 0.86,
     "mean_savings_pct": 45.62,
     "std_savings_pct": 0.45,
-    "mean_peak_reduction_pct": 8.87
+    "mean_co2_saved_kg": 25.08,
+    "mean_peak_reduction_pct": 8.87,
+    "mean_baseline_comfort_pct": 52.2,
+    "std_baseline_comfort_pct": 0.7,
+    "mean_controlled_comfort_pct": 63.9,
+    "std_controlled_comfort_pct": 1.5,
+    "mean_baseline_pmv": -0.572,
+    "mean_controlled_pmv": -0.083,
+    "mean_baseline_ppd": 13.2,
+    "mean_controlled_ppd": 10.9
   },
   "runs": [
     {
@@ -31,9 +42,12 @@
       "baseline_kwh": 141.0,
       "controlled_kwh": 76.57,
       "savings_pct": 45.69,
+      "co2_saved_kg": 24.87,
       "peak_reduction_pct": 13.48,
-      "mean_pmv": -0.09,
-      "comfort_adherence_pct": 63.1
+      "baseline_comfort_pct": 51.7,
+      "controlled_comfort_pct": 63.1,
+      "baseline_mean_pmv": -0.571,
+      "controlled_mean_pmv": -0.09
     },
     {
       "seed": 101,
@@ -43,9 +57,12 @@
       "baseline_kwh": 142.71,
       "controlled_kwh": 78.29,
       "savings_pct": 45.14,
+      "co2_saved_kg": 24.87,
       "peak_reduction_pct": 11.08,
-      "mean_pmv": -0.095,
-      "comfort_adherence_pct": 65.6
+      "baseline_comfort_pct": 52.9,
+      "controlled_comfort_pct": 65.6,
+      "baseline_mean_pmv": -0.568,
+      "controlled_mean_pmv": -0.095
     },
     {
       "seed": 2024,
@@ -55,67 +72,143 @@
       "baseline_kwh": 143.46,
       "controlled_kwh": 77.43,
       "savings_pct": 46.03,
+      "co2_saved_kg": 25.49,
       "peak_reduction_pct": 2.05,
-      "mean_pmv": -0.064,
-      "comfort_adherence_pct": 62.9
+      "baseline_comfort_pct": 51.9,
+      "controlled_comfort_pct": 62.9,
+      "baseline_mean_pmv": -0.576,
+      "controlled_mean_pmv": -0.064
     }
   ],
-  "ai_benchmark": {
-    "controller": "LLM (qwen2.5:1.5b)",
-    "llm_calls_succeeded": 5,
-    "fallback_calls": 0,
-    "mean_llm_latency_s": 4.78,
-    "comfort_adherence_pct": 12.0
+  "matched_comparison_5step": {
+    "baseline": {
+      "energy_kwh": 0.0,
+      "comfort_pct": 12.0,
+      "mean_pmv": -0.678,
+      "mean_ppd": 15.0,
+      "latency_ms": 0.0
+    },
+    "rule_based": {
+      "energy_kwh": 0.0,
+      "savings_pct": 0.0,
+      "comfort_pct": 12.0,
+      "mean_pmv": -0.678,
+      "mean_ppd": 15.0,
+      "latency_ms": 0.03,
+      "setpoint_changes": 0
+    },
+    "llm": {
+      "model": "qwen2.5:1.5b",
+      "available": true,
+      "energy_kwh": 0.0,
+      "savings_pct": 0.0,
+      "comfort_pct": 12.0,
+      "mean_pmv": -0.678,
+      "mean_ppd": 15.0,
+      "latency_s": 4.53,
+      "fallbacks": 0,
+      "setpoint_changes": 0
+    }
   },
-  "mcp_tools": [
+  "mcp_in_process_tool_latencies": [
     {
       "name": "read_building_state",
-      "time_ms": 0.0112,
+      "sample_count": 50,
+      "median_ms": 0.0045,
+      "mean_ms": 0.0051,
+      "p95_ms": 0.0058,
+      "min_ms": 0.0041,
+      "max_ms": 0.0281,
       "status": "Success"
     },
     {
       "name": "get_hvac_setpoints",
-      "time_ms": 0.0208,
+      "sample_count": 50,
+      "median_ms": 0.0099,
+      "mean_ms": 0.0153,
+      "p95_ms": 0.0295,
+      "min_ms": 0.0095,
+      "max_ms": 0.0314,
       "status": "Success"
     },
     {
       "name": "update_setpoint",
-      "time_ms": 0.0389,
+      "sample_count": 50,
+      "median_ms": 0.0045,
+      "mean_ms": 4.7762,
+      "p95_ms": 0.0201,
+      "min_ms": 0.0042,
+      "max_ms": 238.5329,
       "status": "Success"
     },
     {
       "name": "update_all_setpoints",
-      "time_ms": 0.0162,
+      "sample_count": 50,
+      "median_ms": 0.0026,
+      "mean_ms": 0.0028,
+      "p95_ms": 0.0035,
+      "min_ms": 0.0025,
+      "max_ms": 0.0075,
       "status": "Success"
     },
     {
       "name": "run_simulation_step",
-      "time_ms": 0.0071,
+      "sample_count": 50,
+      "median_ms": 0.001,
+      "mean_ms": 0.0011,
+      "p95_ms": 0.0014,
+      "min_ms": 0.0009,
+      "max_ms": 0.0028,
       "status": "Success"
     },
     {
       "name": "get_energy_usage",
-      "time_ms": 0.0559,
+      "sample_count": 50,
+      "median_ms": 0.0077,
+      "mean_ms": 0.0122,
+      "p95_ms": 0.019,
+      "min_ms": 0.007,
+      "max_ms": 0.1849,
       "status": "Success"
     },
     {
       "name": "calculate_savings",
-      "time_ms": 0.0412,
+      "sample_count": 50,
+      "median_ms": 0.007,
+      "mean_ms": 0.0074,
+      "p95_ms": 0.0114,
+      "min_ms": 0.0064,
+      "max_ms": 0.0131,
       "status": "Success"
     },
     {
       "name": "get_comfort_report",
-      "time_ms": 0.041,
+      "sample_count": 50,
+      "median_ms": 0.0072,
+      "mean_ms": 0.0079,
+      "p95_ms": 0.0102,
+      "min_ms": 0.0065,
+      "max_ms": 0.0273,
       "status": "Success"
     },
     {
       "name": "get_outdoor_conditions",
-      "time_ms": 0.0245,
+      "sample_count": 50,
+      "median_ms": 0.0033,
+      "mean_ms": 0.0038,
+      "p95_ms": 0.0047,
+      "min_ms": 0.0031,
+      "max_ms": 0.0234,
       "status": "Success"
     },
     {
       "name": "get_ai_decision",
-      "time_ms": 0.0071,
+      "sample_count": 50,
+      "median_ms": 0.0009,
+      "mean_ms": 0.001,
+      "p95_ms": 0.0014,
+      "min_ms": 0.0008,
+      "max_ms": 0.0039,
       "status": "Success"
     }
   ],
@@ -124,6 +217,7 @@
     "timeout_fallback": "5/5",
     "corrupt_schema_fallback": "5/5",
     "sensor_fault_imputation_passed": true,
-    "polar_freeze_survival_passed": true
+    "polar_freeze_survival_passed": true,
+    "fallback_actuation_applied": true
   }
 }
