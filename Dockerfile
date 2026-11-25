@@ -1,5 +1,5 @@
 # ── Stage 1: Build React Frontend ──────────────────────────────────────────────
-FROM node:20-alpine AS frontend-builder
+FROM node:24-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -17,12 +17,11 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy application code
 COPY backend/ ./backend/
@@ -33,8 +32,12 @@ COPY run.py .
 # Copy compiled frontend from Stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create logs directory
-RUN mkdir -p logs
+# Run without root privileges; named volumes retain writable application data.
+RUN groupadd --gid 10001 ecoloop && useradd --uid 10001 --gid ecoloop --no-create-home ecoloop \
+    && mkdir -p logs data output energyplus/run \
+    && chown -R ecoloop:ecoloop logs data output energyplus/run
+USER ecoloop
+ENV ENVIRONMENT=production REQUIRE_API_KEY=true PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 # Expose port
 EXPOSE 8000

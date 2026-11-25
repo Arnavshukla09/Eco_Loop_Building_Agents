@@ -16,15 +16,18 @@ What it does
 2. Validates pip packages
 3. Checks Ollama connectivity + model availability
 4. Checks EnergyPlus (if SIMULATION_MODE=false)
-5. Builds frontend if needed (npm run build)
+5. Installs locked frontend dependencies and rebuilds the frontend
 6. Launches uvicorn (FastAPI serves everything)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import math
+import os
+import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 # ── Colour helpers (no external deps required) ────────────────────────────────
@@ -61,10 +64,10 @@ PROJECT_ROOT = Path(__file__).parent
 
 def check_python() -> bool:
     v = sys.version_info
-    if v >= (3, 10):
+    if v >= (3, 11):
         _ok(f"Python {v.major}.{v.minor}.{v.micro}")
         return True
-    _fail(f"Python 3.10+ required (you have {v.major}.{v.minor})")
+    _fail(f"Python 3.11+ required (you have {v.major}.{v.minor})")
     return False
 
 
@@ -72,7 +75,12 @@ def check_packages() -> bool:
     required = [
         "fastapi", "uvicorn", "fastmcp", "pydantic",
         "pydantic_settings", "numpy", "tenacity", "rich",
+        "ollama", "httpx", "aiohttp", "sqlalchemy", "greenlet", "aiosqlite",
+        "websockets", "dotenv", "python_multipart",
     ]
+    from config.settings import settings
+    if settings.DATABASE_URL.startswith("postgresql+asyncpg:"):
+        required.append("asyncpg")
     missing = []
     for pkg in required:
         try:
@@ -82,26 +90,27 @@ def check_packages() -> bool:
 
     if missing:
         _warn(f"Missing packages: {', '.join(missing)}")
-        _info("Run:  pip install -r requirements.txt")
+        _info("Run:  pip install -r requirements.lock")
         return False
     _ok("All required Python packages installed.")
     return True
 
 
-def check_ollama(model: str) -> bool:
+def check_ollama(model: str, host: str) -> bool:
     try:
         import ollama  # type: ignore
-        client = ollama.Client()
+        client = ollama.Client(host=host, timeout=2.0)
         models = client.list()
         available = [m.model for m in models.models] if hasattr(models, "models") else []
-        has_model = any(model in m for m in available)
+        tag = model if ":" in model else model + ":latest"
+        has_model = tag in available
         if has_model:
             _ok(f"Ollama running. Model '{model}' available.")
         else:
             _warn(f"Ollama running but model '{model}' not found.")
             _info(f"Run:  ollama pull {model}")
             _info("The system will use rule-based control until the model is pulled.")
-        return True
+        return has_model
     except Exception as exc:
         _warn(f"Ollama not reachable ({exc}).")
         _info("Install Ollama from https://ollama.com then run: ollama serve")
@@ -120,23 +129,26 @@ def check_energyplus(ep_path: str) -> bool:
     return False
 
 
+def _npm_executable() -> str:
+    executable = shutil.which("npm.cmd" if os.name == "nt" else "npm")
+    if executable is None:
+        raise FileNotFoundError("npm is not installed or is missing from PATH")
+    return executable
+
+
 def build_frontend() -> bool:
     fe_dir  = PROJECT_ROOT / "frontend"
-    dist    = fe_dir / "dist"
     pkg     = fe_dir / "package.json"
 
     if not pkg.exists():
         _warn("frontend/package.json not found. Skipping frontend build.")
         return False
 
-    if dist.exists() and list(dist.glob("*.html")):
-        _ok("Frontend already built (frontend/dist).")
-        return True
-
+    # Always rebuild: an existing dist may predate source or dependency changes.
     _info("Building React frontend …")
     try:
         result = subprocess.run(
-            ["npm", "run", "build"],
+            [_npm_executable(), "run", "build"],
             cwd=str(fe_dir),
             capture_output=True,
             text=True,
@@ -147,35 +159,44 @@ def build_frontend() -> bool:
             return True
         _warn("Frontend build failed:")
         print(result.stderr[-500:] if result.stderr else "No output")
-        _info("Run manually:  cd frontend && npm install && npm run build")
+        _info("Run manually:  cd frontend && npm ci && npm run build")
         return False
     except FileNotFoundError:
         _warn("npm not found.  Install Node.js from https://nodejs.org")
-        _info("Run manually:  cd frontend && npm install && npm run build")
+        _info("Run manually:  cd frontend && npm ci && npm run build")
         return False
     except subprocess.TimeoutExpired:
         _warn("Frontend build timed out.")
         return False
 
 
-def install_frontend_deps() -> None:
+def install_frontend_deps() -> bool:
     fe_dir = PROJECT_ROOT / "frontend"
     nm     = fe_dir / "node_modules"
-    if nm.exists():
-        return
+    lock = fe_dir / "package-lock.json"
+    if not lock.is_file():
+        _fail("frontend/package-lock.json is required for a reproducible installation.")
+        return False
+    digest = hashlib.sha256(lock.read_bytes()).hexdigest()
+    marker = nm / ".ecoloop-lock.sha256"
+    if marker.is_file() and marker.read_text(encoding="utf-8").strip() == digest:
+        return True
     _info("Installing frontend npm dependencies …")
     try:
-        subprocess.run(["npm", "install"], cwd=str(fe_dir), check=True, timeout=180)
+        subprocess.run([_npm_executable(), "ci"], cwd=str(fe_dir), check=True, timeout=180)
+        marker.write_text(digest, encoding="utf-8")
         _ok("npm dependencies installed.")
+        return True
     except Exception as exc:
-        _warn(f"npm install failed: {exc}")
+        _warn(f"npm ci failed: {exc}")
+        return False
 
 
 def run_server(host: str, port: int, reload: bool = False) -> None:
     print(f"\n{BOLD}  Starting Eco-Loop server …{RESET}\n")
     print(f"  {GREEN}Dashboard:{RESET}  http://localhost:{port}")
     print(f"  {GREEN}API docs: {RESET}  http://localhost:{port}/docs")
-    print(f"  {GREEN}MCP SSE:  {RESET}  http://localhost:{port}/mcp/sse")
+    print(f"  {GREEN}MCP HTTP: {RESET}  http://localhost:{port}/mcp/")
     print(f"\n  Press Ctrl+C to stop.\n")
 
     try:
@@ -192,9 +213,14 @@ def run_server(host: str, port: int, reload: bool = False) -> None:
 
 
 def main() -> None:
+    # Windows redirected terminals can default to cp1252, which cannot render
+    # the banner or status symbols. Use UTF-8 for terminal and captured output.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Honeywell Eco-Loop launcher")
     parser.add_argument("--check",    action="store_true", help="Check dependencies and exit.")
-    parser.add_argument("--sim-only", action="store_true", help="Force simulation mode (no Ollama required).")
+    parser.add_argument("--sim-only", action="store_true", help="Use the simulator and rule-based control without contacting Ollama.")
     parser.add_argument("--speed",    type=float, default=None, help="Simulation speedup factor (default: 60).")
     parser.add_argument("--host",     default=None, help="API server host (default from settings).")
     parser.add_argument("--port",     type=int, default=None, help="API server port (default from settings).")
@@ -207,14 +233,22 @@ def main() -> None:
     sys.path.insert(0, str(PROJECT_ROOT))
 
     # Apply CLI overrides BEFORE importing settings singleton
-    import os
     if args.sim_only:
         os.environ["SIMULATION_MODE"] = "true"
-        _info("Forced SIMULATION_MODE=true.")
-    if args.speed:
+        os.environ["CONTROL_PROVIDER"] = "rule_based"
+        _info("Using the simulator and rule-based controller.")
+    if args.speed is not None:
+        if not math.isfinite(args.speed) or not 1 <= args.speed <= 3600:
+            parser.error("--speed must be finite and between 1 and 3600")
         os.environ["SPEEDUP_FACTOR"] = str(args.speed)
 
     from config.settings import settings
+    # Also honor overrides if a caller has already imported the settings module.
+    if args.sim_only:
+        settings.SIMULATION_MODE = True
+        settings.CONTROL_PROVIDER = "rule_based"
+    if args.speed is not None:
+        settings.SPEEDUP_FACTOR = args.speed
 
     host = args.host or settings.API_HOST
     port = args.port or settings.API_PORT
@@ -224,7 +258,8 @@ def main() -> None:
     all_ok = True
     all_ok &= check_python()
     all_ok &= check_packages()
-    check_ollama(settings.LLM_MODEL)   # warn only, not fatal
+    if settings.CONTROL_PROVIDER == "hybrid":
+        check_ollama(settings.LLM_MODEL, settings.OLLAMA_HOST)  # fallback remains available
 
     if not settings.SIMULATION_MODE:
         check_energyplus(settings.ENERGYPLUS_PATH)
@@ -234,12 +269,14 @@ def main() -> None:
         sys.exit(0 if all_ok else 1)
 
     if not all_ok:
-        _warn("Some dependencies are missing.  System may not work correctly.")
+        _fail("Required dependencies are missing; resolve them before starting.")
+        sys.exit(1)
 
     # ── Frontend ──────────────────────────────────────────────────────────────
     print(f"\n{BOLD}  Frontend …{RESET}")
-    install_frontend_deps()
-    build_frontend()
+    if not install_frontend_deps() or not build_frontend():
+        _fail("Frontend setup failed; refusing to serve an incomplete or stale dashboard.")
+        sys.exit(1)
 
     # ── Launch server ─────────────────────────────────────────────────────────
     run_server(host, port, reload=args.reload)

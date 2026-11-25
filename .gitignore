@@ -80,3 +80,7 @@ htmlcov/
 *.sqlite
 *.sqlite3
 data/
+.tools/
+frontend/test-results/
+frontend/playwright-report/
+output/

@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend-test:
     name: Backend Tests
@@ -18,15 +25,23 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+          cache-dependency-path: requirements.lock
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.lock
+          pip install pip-audit==2.10.1 bandit==1.9.4
+          pip check
+
+      - name: Audit dependencies and application security
+        run: |
+          pip-audit -r requirements.lock --no-deps --disable-pip
+          bandit -r backend config run.py evaluate.py benchmark.py tools -ll
 
       - name: Run pytest
         run: |
-          pytest -v
+          pytest -v --junitxml=output/backend-tests.xml
 
   frontend-build:
     name: Frontend Build
@@ -37,7 +52,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -45,4 +60,43 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm audit --audit-level=moderate
+          npm test
           npm run build
+
+  browser-e2e:
+    name: Production Dashboard E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python dependencies
+        run: pip install -r requirements.lock
+      - name: Install browser dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium firefox
+      - name: Test production dashboard
+        working-directory: frontend
+        env:
+          E2E_PYTHON: python
+        run: npm run test:e2e
+      - name: Save browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
