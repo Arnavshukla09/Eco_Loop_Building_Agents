@@ -1017,7 +1017,7 @@ The E2E configuration builds the production dashboard and starts an isolated aut
 
 Backend tests cover the API and MCP protocol, origins/authentication, persistence/migrations, reset races, setpoint limiting and failures, simulation faults, fan behavior, timed overrides, forecast/scheduled providers, monitor-only adapters, and launcher/evaluation regressions. Unit tests isolate local Ollama and database state. Hardware protocol tests use doubles rather than contacting building devices.
 
-The local browser suite passed 16 tests across Chromium and Firefox on 26 November 2026. GitHub Actions is configured for locked dependency installation, dependency and static security scans, backend tests, the frontend build, and browser E2E. Remote Firefox CI execution remains pending until a completed GitHub run is recorded. See the [current audit](docs/project_audit_2026-11-26.md) for executed checks and remote CI status; configured jobs are not evidence of success.
+The local browser suite passed 16 tests across Chromium and Firefox on 26 November 2026. GitHub Actions is configured for locked dependency installation, dependency and static security scans, backend tests, the frontend build, and browser E2E. The published release validation at `f29b415` passed all three GitHub jobs, including both browser engines: [CI run 45685980422](https://github.com/Arnavshukla09/Eco_Loop_Building_Agents/actions/runs/45685980422). See the [current audit](docs/project_audit_2026-11-26.md) for executed checks and remote CI status; configured jobs are not evidence of success.
 
 ## Limitations and Future Work
 

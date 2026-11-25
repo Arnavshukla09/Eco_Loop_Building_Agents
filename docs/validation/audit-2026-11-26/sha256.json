@@ -10,6 +10,7 @@
   "docs/validation/audit-2026-11-26/e2e-results.json": "3fb22027d8fda22d75c656d29ecae5959cd1ff69682923f189a2065573bcf307",
   "docs/validation/audit-2026-11-26/final-backend-tests.xml": "d96c837596a1d925bad4959c91c42b4d2e88cd1ae1ae4a3da5e418fa6b4500c7",
   "docs/validation/audit-2026-11-26/frontend-unit-tests.txt": "e1623e6a858c4b42742a370db6ad75d54caa16797519cf9c4b91bf698719186a",
+  "docs/validation/audit-2026-11-26/github-release-validation.json": "f30c8baee7dd2bb6733ba14b8a9ec797bf4eae18bb344a9fc33fbd50483c0c83",
   "docs/validation/audit-2026-11-26/history-secret-scan.json": "213d95b521cbaf7270e2f5c4393c5da34f6443620e732086f3e7569ff3a2a202",
   "docs/validation/audit-2026-11-26/initial-tests.xml": "bb9b0a429b905f27a4701f230af44d016865e01b1dfd231ad3d4632ed1e2733e",
   "docs/validation/audit-2026-11-26/launcher-check.txt": "283c6a3ade51ffa19fbc56156f6ca847c639b51610b43a3a61ef71b79e1cc48b",

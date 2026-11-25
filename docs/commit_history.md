@@ -20,11 +20,12 @@ main
 ├── 5bb1171  feat: matched multi-seed evaluation
 ├── 20eedfe  fix: attribution, comfort and fallback verification
 └── 2026-11-26 release
-    ├── fix(core): secure control, persistence and truthful telemetry
-    ├── feat(simulation): five-zone EnergyPlus and matched benchmarks
-    ├── fix(dashboard): resilient measured telemetry and browser E2E
-    ├── build(ci): locked validation and hardened deployment
-    └── docs(audit): historical comparison and validation evidence
+    ├── d3a400c fix(core): secure control, persistence and truthful telemetry
+    ├── 6b2199d feat(simulation): five-zone EnergyPlus and matched benchmarks
+    ├── 32c38ab fix(dashboard): measured telemetry and browser E2E
+    ├── f2a5856 build(ci): locked validation and hardened deployment
+    ├── f29b415 docs(audit): historical comparison and validation evidence
+    └── docs(release): record successful GitHub validation
 ```
 
 The release entries describe commit subjects; use `git log --graph --oneline --decorate --all` for exact assigned hashes. The release includes the pre-existing unpublished upgrade work plus audited corrections. A local ignored snapshot preserves the starting files.
