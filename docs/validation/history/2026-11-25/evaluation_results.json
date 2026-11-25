@@ -1,0 +1,212 @@
+{
+  "timestamp": "2026-11-25T17:44:36.186204+00:00",
+  "configuration": {
+    "steps": 96,
+    "seeds": [
+      42,
+      101,
+      2024
+    ],
+    "ollama_available": false,
+    "active_controller": "Rule-Based Dynamic Controller (Deterministic Algorithm)",
+    "model": "qwen2.5:1.5b",
+    "co2_factor_kg_per_kwh": 0.386,
+    "baseline_setpoint_cooling": 22.0,
+    "baseline_setpoint_heating": 21.0
+  },
+  "aggregate_metrics": {
+    "active_controller": "Rule-Based Dynamic Controller (Deterministic Algorithm)",
+    "mean_baseline_kwh": 142.39,
+    "std_baseline_kwh": 1.26,
+    "mean_controlled_kwh": 77.43,
+    "std_controlled_kwh": 0.86,
+    "mean_savings_pct": 45.62,
+    "std_savings_pct": 0.45,
+    "mean_co2_saved_kg": 25.08,
+    "mean_peak_reduction_pct": 8.87,
+    "mean_baseline_comfort_pct": 52.2,
+    "std_baseline_comfort_pct": 0.7,
+    "mean_controlled_comfort_pct": 63.9,
+    "std_controlled_comfort_pct": 1.5,
+    "mean_baseline_pmv": -0.572,
+    "mean_controlled_pmv": -0.083,
+    "mean_baseline_ppd": 13.2,
+    "mean_controlled_ppd": 10.9
+  },
+  "runs": [
+    {
+      "seed": 42,
+      "controller_used": "Rule-Based Dynamic Controller",
+      "llm_calls_succeeded": 0,
+      "fallback_calls": 0,
+      "baseline_kwh": 141.0,
+      "controlled_kwh": 76.57,
+      "savings_pct": 45.69,
+      "co2_saved_kg": 24.87,
+      "peak_reduction_pct": 13.48,
+      "baseline_comfort_pct": 51.7,
+      "controlled_comfort_pct": 63.1,
+      "baseline_mean_pmv": -0.571,
+      "controlled_mean_pmv": -0.09
+    },
+    {
+      "seed": 101,
+      "controller_used": "Rule-Based Dynamic Controller",
+      "llm_calls_succeeded": 0,
+      "fallback_calls": 0,
+      "baseline_kwh": 142.71,
+      "controlled_kwh": 78.29,
+      "savings_pct": 45.14,
+      "co2_saved_kg": 24.87,
+      "peak_reduction_pct": 11.08,
+      "baseline_comfort_pct": 52.9,
+      "controlled_comfort_pct": 65.6,
+      "baseline_mean_pmv": -0.568,
+      "controlled_mean_pmv": -0.095
+    },
+    {
+      "seed": 2024,
+      "controller_used": "Rule-Based Dynamic Controller",
+      "llm_calls_succeeded": 0,
+      "fallback_calls": 0,
+      "baseline_kwh": 143.46,
+      "controlled_kwh": 77.43,
+      "savings_pct": 46.03,
+      "co2_saved_kg": 25.49,
+      "peak_reduction_pct": 2.05,
+      "baseline_comfort_pct": 51.9,
+      "controlled_comfort_pct": 62.9,
+      "baseline_mean_pmv": -0.576,
+      "controlled_mean_pmv": -0.064
+    }
+  ],
+  "matched_comparison_5step": {
+    "baseline": {
+      "energy_kwh": 0.0,
+      "comfort_pct": 12.0,
+      "mean_pmv": -0.678,
+      "mean_ppd": 15.0,
+      "latency_ms": 0.0
+    },
+    "rule_based": {
+      "energy_kwh": 0.0,
+      "savings_pct": 0.0,
+      "comfort_pct": 12.0,
+      "mean_pmv": -0.678,
+      "mean_ppd": 15.0,
+      "latency_ms": 0.08,
+      "setpoint_changes": 0
+    },
+    "llm": null
+  },
+  "mcp_in_process_tool_latencies": [
+    {
+      "name": "read_building_state",
+      "sample_count": 50,
+      "median_ms": 0.0098,
+      "mean_ms": 0.0112,
+      "p95_ms": 0.0178,
+      "min_ms": 0.0092,
+      "max_ms": 0.0377,
+      "status": "Success"
+    },
+    {
+      "name": "get_hvac_setpoints",
+      "sample_count": 50,
+      "median_ms": 0.0217,
+      "mean_ms": 0.0225,
+      "p95_ms": 0.0235,
+      "min_ms": 0.0202,
+      "max_ms": 0.0482,
+      "status": "Success"
+    },
+    {
+      "name": "update_setpoint",
+      "sample_count": 50,
+      "median_ms": 0.0592,
+      "mean_ms": 0.0636,
+      "p95_ms": 0.0848,
+      "min_ms": 0.0519,
+      "max_ms": 0.1938,
+      "status": "Success"
+    },
+    {
+      "name": "update_all_setpoints",
+      "sample_count": 50,
+      "median_ms": 0.2223,
+      "mean_ms": 0.2338,
+      "p95_ms": 0.3476,
+      "min_ms": 0.1952,
+      "max_ms": 0.3923,
+      "status": "Success"
+    },
+    {
+      "name": "run_simulation_step",
+      "sample_count": 50,
+      "median_ms": 0.5327,
+      "mean_ms": 0.5658,
+      "p95_ms": 0.6817,
+      "min_ms": 0.4686,
+      "max_ms": 1.3387,
+      "status": "Success"
+    },
+    {
+      "name": "get_energy_usage",
+      "sample_count": 50,
+      "median_ms": 0.0203,
+      "mean_ms": 0.0215,
+      "p95_ms": 0.0287,
+      "min_ms": 0.0197,
+      "max_ms": 0.042,
+      "status": "Success"
+    },
+    {
+      "name": "calculate_savings",
+      "sample_count": 50,
+      "median_ms": 0.0179,
+      "mean_ms": 0.0184,
+      "p95_ms": 0.0212,
+      "min_ms": 0.0171,
+      "max_ms": 0.0284,
+      "status": "Success"
+    },
+    {
+      "name": "get_comfort_report",
+      "sample_count": 50,
+      "median_ms": 0.0155,
+      "mean_ms": 0.0166,
+      "p95_ms": 0.0226,
+      "min_ms": 0.0147,
+      "max_ms": 0.0362,
+      "status": "Success"
+    },
+    {
+      "name": "get_outdoor_conditions",
+      "sample_count": 50,
+      "median_ms": 0.0092,
+      "mean_ms": 0.01,
+      "p95_ms": 0.0114,
+      "min_ms": 0.0087,
+      "max_ms": 0.0325,
+      "status": "Success"
+    },
+    {
+      "name": "get_ai_decision",
+      "sample_count": 50,
+      "median_ms": 0.0047,
+      "mean_ms": 0.0051,
+      "p95_ms": 0.0061,
+      "min_ms": 0.0044,
+      "max_ms": 0.0195,
+      "status": "Success"
+    }
+  ],
+  "fault_tolerance": {
+    "disconnect_fallback": "5/5",
+    "timeout_fallback": "5/5",
+    "corrupt_schema_fallback": "5/5",
+    "sensor_fault_imputation_passed": true,
+    "polar_freeze_survival_passed": true,
+    "fallback_actuation_applied": true
+  }
+}

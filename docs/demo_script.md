@@ -1,5 +1,7 @@
 # Eco-Loop Demo Script — 3-Minute Video
 
+> **Historical demonstration script.** Preserved as originally written; spoken figures and claims are not current validation evidence. Use the [current README](../README.md) and [26 November 2026 audit](project_audit_2026-11-26.md) when preparing a new demonstration.
+
 **Target duration:** 2:45 – 3:00 minutes  
 **Format:** Screen recording with voiceover  
 **Tone:** Confident, energetic, expert

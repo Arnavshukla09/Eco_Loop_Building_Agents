@@ -1,0 +1,92 @@
+{
+  "model": "synthetic thermal model with fan/ventilation",
+  "currency": "USD",
+  "run_order": "step then decide for next step",
+  "runs": [
+    {
+      "mode": "fixed",
+      "season": "winter",
+      "seed": 42,
+      "status": "completed",
+      "steps": 96,
+      "days": 1.0,
+      "energy_kwh": 164.295,
+      "cost": 20.8335,
+      "peak_kw": 19.47,
+      "fan_energy_kwh": 28.474,
+      "occupied_comfort_pct": 80.44,
+      "occupied_zone_samples": 225,
+      "discomfort_degree_hours": 0.0,
+      "decision_sources": {},
+      "mean_decision_seconds": 0,
+      "p95_decision_seconds": 0
+    },
+    {
+      "mode": "scheduled",
+      "season": "winter",
+      "seed": 42,
+      "status": "completed",
+      "steps": 96,
+      "days": 1.0,
+      "energy_kwh": 100.459,
+      "cost": 13.2978,
+      "peak_kw": 22.19,
+      "fan_energy_kwh": 15.959,
+      "occupied_comfort_pct": 78.22,
+      "occupied_zone_samples": 225,
+      "discomfort_degree_hours": 1.225,
+      "decision_sources": {
+        "scheduled": 96
+      },
+      "mean_decision_seconds": 0.0,
+      "p95_decision_seconds": 0.0
+    },
+    {
+      "mode": "rule_based",
+      "season": "winter",
+      "seed": 42,
+      "status": "completed",
+      "steps": 96,
+      "days": 1.0,
+      "energy_kwh": 128.475,
+      "cost": 16.1629,
+      "peak_kw": 31.19,
+      "fan_energy_kwh": 34.76,
+      "occupied_comfort_pct": 81.33,
+      "occupied_zone_samples": 225,
+      "discomfort_degree_hours": 1.225,
+      "decision_sources": {
+        "rule_based": 96
+      },
+      "mean_decision_seconds": 0.0,
+      "p95_decision_seconds": 0.0
+    },
+    {
+      "mode": "forecast",
+      "season": "winter",
+      "seed": 42,
+      "status": "completed",
+      "steps": 96,
+      "days": 1.0,
+      "energy_kwh": 111.101,
+      "cost": 13.5049,
+      "peak_kw": 30.19,
+      "fan_energy_kwh": 15.959,
+      "occupied_comfort_pct": 83.11,
+      "occupied_zone_samples": 225,
+      "discomfort_degree_hours": 0.0,
+      "decision_sources": {
+        "forecast": 96
+      },
+      "mean_decision_seconds": 0.0,
+      "p95_decision_seconds": 0.0
+    },
+    {
+      "mode": "llm",
+      "season": "winter",
+      "seed": 42,
+      "status": "unavailable",
+      "model": "qwen2.5:1.5b"
+    }
+  ]
+}

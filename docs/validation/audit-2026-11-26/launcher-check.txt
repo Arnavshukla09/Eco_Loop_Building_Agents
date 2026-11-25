@@ -1,0 +1,18 @@
+
+[38;5;208m[1m
+ ██╗  ██╗ ██████╗ ███╗   ██╗███████╗██╗   ██╗██╗    ██╗███████╗██╗     ██╗
+ ██║  ██║██╔═══██╗████╗  ██║██╔════╝╚██╗ ██╔╝██║    ██║██╔════╝██║     ██║
+ ███████║██║   ██║██╔██╗ ██║█████╗   ╚████╔╝ ██║ █╗ ██║█████╗  ██║     ██║
+ ██╔══██║██║   ██║██║╚██╗██║██╔══╝    ╚██╔╝  ██║███╗██║██╔══╝  ██║     ██║
+ ██║  ██║╚██████╔╝██║ ╚████║███████╗   ██║   ╚███╔███╔╝███████╗███████╗███████╗
+ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝   ╚═╝    ╚══╝╚══╝ ╚══════╝╚══════╝╚══════╝
+[0m
+[1m  Eco-Loop Building Agents  —  Honeywell Hackathon 2024[0m
+  Autonomous AI • EnergyPlus Simulation • MCP Server • Live Dashboard
+
+  [36mℹ[0m  Using the simulator and rule-based controller.
+[1m  Checking dependencies …[0m
+  [32m✔[0m  Python 3.11.15
+  [32m✔[0m  All required Python packages installed.
+
+  All checks passed.

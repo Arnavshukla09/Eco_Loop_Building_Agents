@@ -1,0 +1,21 @@
+{
+  "docs/validation/audit-2026-11-26/actions-before-jobs.json": "a20f4f981413e8b87b10b883e25d982ac5ebeba57e8c88ebb30514c0cd7649df",
+  "docs/validation/audit-2026-11-26/actions-before.json": "21a11a9ad487e8a3cc61ae63a6bc91712774c17c68be0007dfa11513b9550418",
+  "docs/validation/audit-2026-11-26/bandit-final.json": "b116a71aabe3ffe92fa16650118b40e05dc4896d3107773507d331a3a7e8ec41",
+  "docs/validation/audit-2026-11-26/bandit-initial.json": "8747fe536b41f307295db6e8f164a319b82d85c40485fecc42e84974d594b884",
+  "docs/validation/audit-2026-11-26/dashboard-desktop-chromium.png": "f007466e3218829e98f6e7e3f34ff52a57b4f83202929e3b32f5336aff3d06a5",
+  "docs/validation/audit-2026-11-26/dashboard-desktop-firefox.png": "35f63582b2c322dfcdc1f64eef72c4e5b13ac75543e041b7b3d4790a24911e1a",
+  "docs/validation/audit-2026-11-26/dashboard-mobile-chromium.png": "147ad720771a8c417b2f572c3bf7b4b2ed17a34f6fbac506aa2805c67070e6cd",
+  "docs/validation/audit-2026-11-26/dashboard-mobile-firefox.png": "f76c014e2004cbd0f8c4013a829b5cf62b8e3160a1eea36415347eca7cec9479",
+  "docs/validation/audit-2026-11-26/e2e-results.json": "3fb22027d8fda22d75c656d29ecae5959cd1ff69682923f189a2065573bcf307",
+  "docs/validation/audit-2026-11-26/final-backend-tests.xml": "d96c837596a1d925bad4959c91c42b4d2e88cd1ae1ae4a3da5e418fa6b4500c7",
+  "docs/validation/audit-2026-11-26/frontend-unit-tests.txt": "e1623e6a858c4b42742a370db6ad75d54caa16797519cf9c4b91bf698719186a",
+  "docs/validation/audit-2026-11-26/history-secret-scan.json": "213d95b521cbaf7270e2f5c4393c5da34f6443620e732086f3e7569ff3a2a202",
+  "docs/validation/audit-2026-11-26/initial-tests.xml": "bb9b0a429b905f27a4701f230af44d016865e01b1dfd231ad3d4632ed1e2733e",
+  "docs/validation/audit-2026-11-26/launcher-check.txt": "283c6a3ade51ffa19fbc56156f6ca847c639b51610b43a3a61ef71b79e1cc48b",
+  "docs/validation/audit-2026-11-26/locked-dependency-audit.json": "0580029a20c5e010af2177b03489a2f548cb623e4322fe37f95ceaac135d356d",
+  "docs/validation/audit-2026-11-26/npm-audit.json": "475546a78397a9edcbbef63ebbdde4b2188ccd584bae274afbade69587b0786b",
+  "docs/validation/audit-2026-11-26/published-head-tests.xml": "5a17d2e681e9e00a21d50be0c5719e75e3cd544e1833b84081930ae5d95c4b44",
+  "docs/validation/audit-2026-11-26/python-audit.json": "687595dcb2f374ba7d32ccfbf391665b06fa6d266423f0036a7cb64ed3211db5",
+  "docs/validation/audit-2026-11-26/secret-scan.json": "b00cda8997229919ace98cd0b24e720f257951c57bcd598bda77ead5e3d49382"
+}

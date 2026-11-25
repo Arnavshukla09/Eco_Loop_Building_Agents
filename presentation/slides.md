@@ -1,5 +1,7 @@
 # Honeywell Eco-Loop — 10-Slide Presentation
 
+> **Archived submission slides.** Figures and deployment claims below preserve the original presentation and may be obsolete. The root PDF and PPTX submissions are also unchanged archival artifacts. Use the [current README](../README.md) and [26 November 2026 audit](../docs/project_audit_2026-11-26.md) for a new presentation.
+
 ---
 
 ## Slide 1: The Problem

@@ -1,0 +1,19 @@
+
+> honeywell-ecoloop-dashboard@1.0.0 test
+> node --test tests/*.test.js
+
+✔ API validation errors become readable text instead of React children (0.5983ms)
+✔ zone history uses measured temperatures and leaves unavailable readings empty (0.5925ms)
+✔ baseline uses measured instantaneous power even with zero savings (0.1176ms)
+✔ missing reference data leaves a gap rather than inventing savings (0.0733ms)
+✔ heartbeat updates replace a timestep without duplicating history (1.1351ms)
+✔ new simulation steps append and respect the history limit (0.1388ms)
+✔ control feedback displays actual values per zone (0.138ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 97.7883

@@ -1,0 +1,105 @@
+{
+  "status": "passed",
+  "engine": "EnergyPlus 24.1",
+  "zones": [
+    "Core",
+    "Perimeter_N",
+    "Perimeter_S",
+    "Perimeter_E",
+    "Perimeter_W"
+  ],
+  "steps": 2,
+  "setpoint_actuation": {
+    "zone_id": "Core",
+    "temperature": 18.26,
+    "setpoint_cooling": 26.0,
+    "setpoint_heating": 18.0,
+    "pmv_score": -1.655,
+    "ppd_score": 59.3,
+    "humidity": 50.0,
+    "sensor_fault": false,
+    "raw_temperature": null,
+    "comfort_label": "Uncomfortable"
+  },
+  "observation": {
+    "timestamp": "2026-11-25T19:17:32.222703Z",
+    "simulation_time": "2026-01-21T00:30:00",
+    "zones": {
+      "Core": {
+        "zone_id": "Core",
+        "temperature": 18.26,
+        "setpoint_cooling": 26.0,
+        "setpoint_heating": 18.0,
+        "pmv_score": -1.655,
+        "ppd_score": 59.3,
+        "humidity": 50.0,
+        "sensor_fault": false,
+        "raw_temperature": null,
+        "comfort_label": "Uncomfortable"
+      },
+      "Perimeter_N": {
+        "zone_id": "Perimeter_N",
+        "temperature": 20.0,
+        "setpoint_cooling": 24.0,
+        "setpoint_heating": 20.0,
+        "pmv_score": -1.141,
+        "ppd_score": 32.4,
+        "humidity": 50.0,
+        "sensor_fault": false,
+        "raw_temperature": null,
+        "comfort_label": "Uncomfortable"
+      },
+      "Perimeter_S": {
+        "zone_id": "Perimeter_S",
+        "temperature": 20.0,
+        "setpoint_cooling": 24.0,
+        "setpoint_heating": 20.0,
+        "pmv_score": -1.141,
+        "ppd_score": 32.4,
+        "humidity": 50.0,
+        "sensor_fault": false,
+        "raw_temperature": null,
+        "comfort_label": "Uncomfortable"
+      },
+      "Perimeter_E": {
+        "zone_id": "Perimeter_E",
+        "temperature": 20.0,
+        "setpoint_cooling": 24.0,
+        "setpoint_heating": 20.0,
+        "pmv_score": -1.141,
+        "ppd_score": 32.4,
+        "humidity": 50.0,
+        "sensor_fault": false,
+        "raw_temperature": null,
+        "comfort_label": "Uncomfortable"
+      },
+      "Perimeter_W": {
+        "zone_id": "Perimeter_W",
+        "temperature": 20.0,
+        "setpoint_cooling": 24.0,
+        "setpoint_heating": 20.0,
+        "pmv_score": -1.141,
+        "ppd_score": 32.4,
+        "humidity": 50.0,
+        "sensor_fault": false,
+        "raw_temperature": null,
+        "comfort_label": "Uncomfortable"
+      }
+    },
+    "outdoor_temp": -20.0,
+    "outdoor_humidity": 50.0,
+    "total_energy_kwh": 11.539,
+    "hvac_power_kw": 5.271722833975997,
+    "occupancy": 0.8,
+    "timestep": 2,
+    "fan_speed": "medium",
+    "fan_power_kw": 0.0,
+    "ventilation_m3s": 0.0,
+    "electricity_rate": 0.0,
+    "total_cost": 0.0,
+    "forecast": [],
+    "avg_temperature": 19.652,
+    "avg_pmv": -1.2438,
+    "avg_ppd": 37.78
+  }
+}

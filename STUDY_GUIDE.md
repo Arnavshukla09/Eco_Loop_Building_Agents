@@ -1,5 +1,7 @@
 # Eco-Loop — Complete Project Context & Study Guide
 
+> **Historical study material.** Preserved from the original submission; examples, timing, deployment, and performance claims may be obsolete. Use the [current README](README.md) and [26 November 2026 audit](docs/project_audit_2026-11-26.md) for verified current behavior.
+
 > Everything you need to understand, explain, and extend the Eco-Loop project.
 > Study this top-to-bottom before your hackathon presentation or interview.
 

@@ -1,5 +1,7 @@
 # Eco-Loop Building Agents — Technical Architecture Audit & Engineering Review
 
+> **Historical engineering review (October 2026).** Preserved to show earlier findings and remedies; readiness assertions and guarantees below are not current certification or validation. See the [26 November 2026 audit](docs/project_audit_2026-11-26.md) for current findings, evidence, and unresolved limits.
+
 This document provides a factual, in-depth engineering audit of the **Eco_Loop_Building_Agents** repository, evaluating its architecture, physical simulation rigor, asynchronous concurrency model, and production readiness.
 
 ---

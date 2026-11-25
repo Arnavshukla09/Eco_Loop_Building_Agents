@@ -1,5 +1,7 @@
 # Eco-Loop System Evaluation Report
 
+> **Historical evaluation snapshot (October 2026).** These results describe the earlier controller/model and must not be presented as the current implementation. See the [current evaluation](docs/validation/evaluation_report.md) and [26 November 2026 audit](docs/project_audit_2026-11-26.md). The adjacent root `evaluation_results.json` and `energy_comparison.png` belong to this historical snapshot.
+
 > **Generated:** 2026-10-29 07:23:35 UTC  
 > **Evaluation Scope:** 1 Full Day (96 timesteps × 15 min) | Seeds: `[42, 101, 2024]` | CO₂ Factor: 0.386 kg/kWh  
 > **Active Dynamic Controller Under Test:** `Rule-Based Dynamic Controller (Deterministic Algorithm)`
