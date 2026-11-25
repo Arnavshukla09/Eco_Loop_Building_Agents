@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { Sliders, RotateCcw, CheckCircle2, AlertTriangle, Key, ShieldCheck } from 'lucide-react';
+import { formatAppliedSetpoints } from '../utils/telemetry';
+import { apiError, getApiToken, setApiToken } from '../utils/api';
 
 const ZONES = ['Core', 'Perimeter_N', 'Perimeter_S', 'Perimeter_E', 'Perimeter_W'];
 
@@ -7,7 +9,8 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
   const [selectedZone, setSelectedZone] = useState('ALL');
   const [cooling, setCooling] = useState(24.0);
   const [heating, setHeating] = useState(20.0);
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('eco_api_key') || '');
+  const [duration, setDuration] = useState(60);
+  const [apiKey, setApiKey] = useState(getApiToken);
   const [showKeyField, setShowKeyField] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
@@ -36,7 +39,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
   const handleApiKeyChange = (e) => {
     const key = e.target.value;
     setApiKey(key);
-    localStorage.setItem('eco_api_key', key);
+    setApiToken(key);
   };
 
   const applySetpoints = async (e) => {
@@ -49,6 +52,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
       zone: selectedZone === 'ALL' ? null : selectedZone,
       cooling: cooling,
       heating: heating,
+      duration_minutes: duration,
     };
 
     const headers = { 'Content-Type': 'application/json' };
@@ -67,12 +71,12 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
       if (res.ok && data.success) {
         setFeedback({
           type: 'success',
-          message: `${data.message} (Cool: ${data.cooling_c}°C, Heat: ${data.heating_c}°C)`,
+          message: `${data.message} ${formatAppliedSetpoints(data.applied_setpoints)}`,
         });
       } else {
         setFeedback({
           type: 'error',
-          message: data.detail || data.message || 'Failed to update setpoints.',
+          message: apiError(data, 'Failed to update setpoints.'),
         });
       }
     } catch (err) {
@@ -112,7 +116,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
       } else {
         setFeedback({
           type: 'error',
-          message: data.detail || 'Failed to reset simulation.',
+          message: apiError(data, 'Failed to reset simulation.'),
         });
       }
     } catch (err) {
@@ -152,6 +156,8 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
         <div className="mb-4 p-3 bg-black/40 border border-white/5 rounded-lg text-xs space-y-1">
           <label className="text-gray-400 block font-medium">Authorization Bearer Token (Optional in Dev):</label>
           <input
+            aria-label="API token"
+            autoComplete="off"
             type="password"
             value={apiKey}
             onChange={handleApiKeyChange}
@@ -162,11 +168,13 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
       )}
 
       <form onSubmit={applySetpoints} className="space-y-4">
+        <label className="block text-sm">Hold duration (simulated minutes)<input aria-label="Hold duration" type="number" min="1" max="1440" required value={duration} onChange={e => setDuration(Number(e.target.value))} className="ml-3 bg-brand-navy border border-white/20 rounded p-1" /></label>
         <div>
           <label className="text-xs font-semibold text-gray-400 block mb-1 uppercase tracking-wider">
             Target Zone
           </label>
           <select
+            aria-label="Target Zone"
             value={selectedZone}
             onChange={(e) => setSelectedZone(e.target.value)}
             className="w-full bg-[#0A0E1A] border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-brand-orange"
@@ -185,6 +193,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
               <span className="font-mono text-sm font-bold text-blue-300">{heating.toFixed(1)}°C</span>
             </div>
             <input
+              aria-label="Heating Setpoint"
               type="range"
               min="16.0"
               max="22.0"
@@ -205,6 +214,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
               <span className="font-mono text-sm font-bold text-orange-300">{cooling.toFixed(1)}°C</span>
             </div>
             <input
+              aria-label="Cooling Setpoint"
               type="range"
               min="20.0"
               max="30.0"
@@ -232,6 +242,7 @@ export default function SetpointControl({ currentSetpoints, isConnected, onReset
 
         {feedback && (
           <div
+            role={feedback.type === 'error' ? 'alert' : 'status'}
             className={`p-3 rounded-lg text-xs flex items-center gap-2 ${
               feedback.type === 'success'
                 ? 'bg-green-500/10 border border-green-500/30 text-green-300'

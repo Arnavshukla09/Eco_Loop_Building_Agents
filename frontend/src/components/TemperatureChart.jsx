@@ -13,6 +13,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import 'chartjs-adapter-date-fns';
+import { zoneTemperature } from '../utils/telemetry';
 
 ChartJS.register(
   CategoryScale,
@@ -45,7 +46,7 @@ export default function TemperatureChart({ history, zones }) {
         label: zoneName.replace('Perimeter_', 'P_'),
         data: recentHistory.map(h => ({
           x: new Date(h.sim_time),
-          y: h.zones && h.zones[zoneName] ? h.zones[zoneName].temperature : (h.avg_temp + (Math.random() - 0.5))
+          y: zoneTemperature(h, zoneName)
         })),
         borderColor: ZONE_COLORS[zoneName],
         backgroundColor: ZONE_COLORS[zoneName] + '33',

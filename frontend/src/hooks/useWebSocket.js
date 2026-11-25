@@ -4,10 +4,6 @@ function getDefaultWebSocketUrl() {
   if (typeof window === 'undefined') return 'ws://localhost:8000/ws';
   if (import.meta.env?.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // If running on Vite dev server (port 5173), connect to default backend port 8000
-  if (window.location.port === '5173') {
-    return `${protocol}//${window.location.hostname}:8000/ws`;
-  }
   return `${protocol}//${window.location.host}/ws`;
 }
 
@@ -44,10 +40,11 @@ export function useWebSocket(url) {
       if (ws.current && (ws.current.readyState === WebSocket.CONNECTING || ws.current.readyState === WebSocket.OPEN)) {
         return;
       }
-      ws.current = new WebSocket(targetUrl);
+      const socket = new WebSocket(targetUrl);
+      ws.current = socket;
 
-      ws.current.onopen = () => {
-        if (isUnmounted.current) return;
+      socket.onopen = () => {
+        if (isUnmounted.current || ws.current !== socket) return;
         setIsConnected(true);
         reconnectCountRef.current = 0;
         setReconnectCount(0);
@@ -61,8 +58,8 @@ export function useWebSocket(url) {
         }, 20000);
       };
 
-      ws.current.onmessage = (event) => {
-        if (isUnmounted.current) return;
+      socket.onmessage = (event) => {
+        if (isUnmounted.current || ws.current !== socket || event.data === 'pong') return;
         try {
           const parsed = JSON.parse(event.data);
           // Accept explicit state_update, or payloads containing standard building snapshot
@@ -76,8 +73,8 @@ export function useWebSocket(url) {
         }
       };
 
-      ws.current.onclose = () => {
-        if (isUnmounted.current) return;
+      socket.onclose = () => {
+        if (isUnmounted.current || ws.current !== socket) return;
         setIsConnected(false);
         if (pingInterval.current) clearInterval(pingInterval.current);
         
@@ -93,9 +90,8 @@ export function useWebSocket(url) {
         }, timeout);
       };
 
-      ws.current.onerror = (error) => {
-        console.error('WebSocket Error:', error);
-        ws.current?.close();
+      socket.onerror = () => {
+        socket.close();
       };
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
@@ -111,7 +107,10 @@ export function useWebSocket(url) {
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
       if (pingInterval.current) clearInterval(pingInterval.current);
       if (ws.current) {
+        ws.current.onclose = null;
+        ws.current.onerror = null;
         ws.current.close();
+        ws.current = null;
       }
     };
   }, [connect]);

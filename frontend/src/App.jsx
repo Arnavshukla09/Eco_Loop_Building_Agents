@@ -10,6 +10,9 @@ import SavingsCounter from './components/SavingsCounter';
 import SetpointControl from './components/SetpointControl';
 import { Building2, Zap, Percent, TreePine, Thermometer, WifiOff, Wifi, Clock, Bot, Cpu, AlertTriangle } from 'lucide-react';
 import { format } from 'date-fns';
+import { appendTelemetry } from './utils/telemetry';
+import RunHistory from './components/RunHistory';
+import ControlStatus from './components/ControlStatus';
 
 export default function App() {
   const { data, isConnected, isStale, lastUpdate } = useWebSocket();
@@ -17,10 +20,13 @@ export default function App() {
 
   useEffect(() => {
     fetch('/api/history?limit=100')
-      .then(res => res.json())
+      .then(res => { if (!res.ok) throw new Error('History unavailable'); return res.json(); })
       .then(d => {
         if (d && d.entries) {
-          setHistory(d.entries);
+          setHistory(prev => {
+            const entries = new Map([...d.entries, ...prev].map(entry => [entry.sim_time, entry]));
+            return [...entries.values()].sort((a, b) => a.sim_time.localeCompare(b.sim_time)).slice(-200);
+          });
         }
       })
       .catch(err => console.error("Failed to fetch history:", err));
@@ -34,6 +40,9 @@ export default function App() {
           wall_time: data.timestamp,
           avg_temp: data.building.avg_temperature,
           hvac_power_kw: data.building.hvac_power_kw,
+          baseline_power_kw: data.metrics?.baseline_power_kw ?? null,
+          total_cost: data.building.total_cost,
+          fan_power_kw: data.building.fan_power_kw,
           total_energy_kwh: data.building.total_energy_kwh,
           comfort_score: data.metrics?.comfort_score || 0,
           energy_savings_pct: data.metrics?.energy_savings_pct || 0,
@@ -41,9 +50,7 @@ export default function App() {
           occupancy: data.building.occupancy,
           zones: data.building.zones
         };
-        const next = [...prev, newEntry];
-        if (next.length > 200) return next.slice(-200);
-        return next;
+        return appendTelemetry(prev, newEntry);
       });
     }
   }, [data]);
@@ -60,6 +67,7 @@ export default function App() {
 
   const { building, ai_decision, metrics, simulation_mode } = data;
   const isLLMActive = ai_decision?.controller_source === 'llm';
+  const providerLabel = isLLMActive ? 'Qwen2.5 LLM' : ({ rule_based: 'Rule-Based Control', forecast: 'Forecast Control', scheduled: 'Scheduled Control', fallback: 'Rule-Based Fallback' }[ai_decision?.controller_source] || 'Starting Controller');
 
   return (
     <div className="min-h-screen bg-brand-navy text-gray-200 p-4 md:p-6 lg:p-8 font-sans selection:bg-brand-orange/30">
@@ -95,7 +103,7 @@ export default function App() {
                   : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
               }`}>
                 {isLLMActive ? <Bot size={11} /> : <Cpu size={11} />}
-                {isLLMActive ? 'Qwen2.5 LLM' : 'Rule-Based Fallback'}
+                {providerLabel}
               </span>
             </div>
             <p className="text-sm text-gray-400">Autonomous Physical AI & HVAC Optimization</p>
@@ -152,7 +160,7 @@ export default function App() {
             unit="%" 
             icon={Percent} 
             color="#22C55E"
-            subtitle="ASHRAE 55 Compliant"
+            subtitle="1 − mean PPD; not a compliance certificate"
           />
           <MetricCard 
             title="Energy Savings" 
@@ -160,7 +168,7 @@ export default function App() {
             unit="%" 
             icon={Zap} 
             color="#10B981"
-            trend={{ dir: 'up', val: metrics.energy_savings_pct.toFixed(1) }}
+            trend={{ dir: metrics.energy_savings_pct < 0 ? 'down' : 'up', val: metrics.energy_savings_pct.toFixed(1) }}
           />
           <MetricCard 
             title="CO₂ Saved" 
@@ -174,7 +182,7 @@ export default function App() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <AIDecisionPanel decision={ai_decision} isConnected={isConnected} />
+            <AIDecisionPanel decision={ai_decision} isConnected={isConnected} fanSupported={data.control?.fan_actuation_supported} />
           </div>
           <div className="lg:col-span-1">
             <ComfortGauge 
@@ -211,6 +219,8 @@ export default function App() {
         <div className="w-full">
           <ZoneGrid zones={building.zones} />
         </div>
+        <ControlStatus control={data.control} building={building} />
+        <RunHistory />
       </main>
 
       <footer className="mt-12 pt-4 border-t border-white/10 flex flex-wrap justify-between items-center text-xs text-gray-500 gap-4">

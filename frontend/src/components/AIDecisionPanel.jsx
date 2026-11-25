@@ -1,7 +1,7 @@
 import React from 'react';
 import { Cpu, Wind, ThermometerSnowflake, Flame } from 'lucide-react';
 
-export default function AIDecisionPanel({ decision, isConnected }) {
+export default function AIDecisionPanel({ decision, isConnected, fanSupported = false }) {
   if (!decision) {
     return (
       <div className="glass-card p-6 h-full border-l-4 border-l-gray-600 flex items-center justify-center">
@@ -41,7 +41,7 @@ export default function AIDecisionPanel({ decision, isConnected }) {
         
         <div className="text-right">
           <div className="text-xs text-gray-400 mb-1">Est. Savings</div>
-          <div className="text-xl font-bold text-green-400">+{estimated_savings_pct?.toFixed(1)}%</div>
+          <div className={`text-xl font-bold ${estimated_savings_pct < 0 ? 'text-red-400' : 'text-green-400'}`}>{estimated_savings_pct >= 0 ? '+' : ''}{estimated_savings_pct?.toFixed(1)}%</div>
         </div>
       </div>
 
@@ -52,7 +52,7 @@ export default function AIDecisionPanel({ decision, isConnected }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-grow">
         <div>
           <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
-            <Wind size={16} /> Fan Speed
+            <Wind size={16} /> {fanSupported ? 'Fan Control' : 'Fan Recommendation (Advisory)'}
           </h3>
           <div className="flex items-end gap-1 h-8">
             <div className={`w-1/3 rounded-t-sm transition-all duration-500 ${fan_speed === 'low' || fan_speed === 'medium' || fan_speed === 'high' ? 'bg-brand-orange h-4' : 'bg-gray-700 h-2'}`}></div>
@@ -63,21 +63,23 @@ export default function AIDecisionPanel({ decision, isConnected }) {
         </div>
         
         <div>
-          <h3 className="text-sm font-medium text-gray-400 mb-3">Zone Setpoints</h3>
+          <h3 className="text-sm font-medium text-gray-400 mb-3">Requested → Applied Setpoints</h3>
           <div className="space-y-2 font-mono text-xs max-h-32 overflow-y-auto pr-2 custom-scrollbar">
-            {Object.entries(zone_setpoints || {}).map(([zone, sp]) => (
+            {Object.entries(zone_setpoints || {}).map(([zone, requested]) => {
+              const sp = decision.applied_setpoints?.[zone];
+              return (
               <div key={zone} className="flex justify-between items-center py-1 border-b border-white/5">
                 <span className="text-gray-300 truncate w-24" title={zone}>{zone.replace('Perimeter_', 'P_')}</span>
                 <div className="flex gap-3">
                   <span className="text-blue-400 flex items-center gap-1" title="Cooling Setpoint">
-                    <ThermometerSnowflake size={12}/> {sp.cooling.toFixed(1)}
+                    <ThermometerSnowflake size={12}/> {requested.cooling.toFixed(1)} → {sp ? sp.cooling.toFixed(1) : 'held / rejected'}
                   </span>
                   <span className="text-red-400 flex items-center gap-1" title="Heating Setpoint">
-                    <Flame size={12}/> {sp.heating.toFixed(1)}
+                    <Flame size={12}/> {requested.heating.toFixed(1)} → {sp ? sp.heating.toFixed(1) : 'held / rejected'}
                   </span>
                 </div>
               </div>
-            ))}
+            ); })}
           </div>
         </div>
       </div>

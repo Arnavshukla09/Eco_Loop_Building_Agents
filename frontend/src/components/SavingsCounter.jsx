@@ -9,6 +9,7 @@ export default function SavingsCounter({ savingsPct = 0, co2Saved = 0, totalEner
     const duration = 1000;
     const initialValue = displayValue;
 
+    let frame;
     const step = (timestamp) => {
       if (!startTimestamp) startTimestamp = timestamp;
       const progress = Math.min((timestamp - startTimestamp) / duration, 1);
@@ -18,15 +19,18 @@ export default function SavingsCounter({ savingsPct = 0, co2Saved = 0, totalEner
       setDisplayValue(initialValue + (savingsPct - initialValue) * ease);
       
       if (progress < 1) {
-        window.requestAnimationFrame(step);
+        frame = window.requestAnimationFrame(step);
       }
     };
     
-    window.requestAnimationFrame(step);
+    frame = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(frame);
   }, [savingsPct]);
 
-  const treesPlanted = (co2Saved / 21).toFixed(1);
-  const milesAvoided = (co2Saved / 0.4).toFixed(0);
+  const treesPlanted = (Math.abs(co2Saved) / 21).toFixed(1);
+  const milesAvoided = (Math.abs(co2Saved) / 0.4).toFixed(0);
+  const reduction = savingsPct >= 0;
+  const ratio = Math.max(0, Math.min(100, totalEnergy / Math.max(baselineEnergy, 1) * 100));
 
   return (
     <div className="glass-card p-6 relative overflow-hidden bg-gradient-to-br from-[#111827] to-[#1a2f1c]">
@@ -39,22 +43,22 @@ export default function SavingsCounter({ savingsPct = 0, co2Saved = 0, totalEner
       </h3>
       
       <div className="mb-6">
-        <div className="text-5xl font-bold text-green-400 tracking-tighter">
+        <div className={`text-5xl font-bold tracking-tighter ${reduction ? 'text-green-400' : 'text-red-400'}`}>
           {displayValue.toFixed(1)}<span className="text-2xl text-green-500/50 ml-1">%</span>
         </div>
-        <div className="text-sm text-gray-400 mt-1">Total Energy Reduction</div>
+        <div className="text-sm text-gray-400 mt-1">{reduction ? 'Total Energy Reduction' : 'Energy use above baseline'}</div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-6 relative z-10">
         <div className="bg-black/20 rounded-lg p-3 border border-white/5">
           <div className="flex items-center gap-2 text-green-500 mb-1">
-            <TreePine size={14} /> <span className="text-xs uppercase font-bold tracking-wider">Trees Eq.</span>
+            <TreePine size={14} /> <span className="text-xs uppercase font-bold tracking-wider">{co2Saved >= 0 ? 'Trees Eq.' : 'Extra CO₂ (kg)'}</span>
           </div>
-          <div className="text-xl font-medium text-white">{treesPlanted}</div>
+          <div className="text-xl font-medium text-white">{co2Saved >= 0 ? treesPlanted : Math.abs(co2Saved).toFixed(1)}</div>
         </div>
         <div className="bg-black/20 rounded-lg p-3 border border-white/5">
           <div className="flex items-center gap-2 text-blue-400 mb-1">
-            <Car size={14} /> <span className="text-xs uppercase font-bold tracking-wider">Miles Avoided</span>
+            <Car size={14} /> <span className="text-xs uppercase font-bold tracking-wider">{co2Saved >= 0 ? 'Miles Avoided' : 'Extra Miles Eq.'}</span>
           </div>
           <div className="text-xl font-medium text-white">{milesAvoided}</div>
         </div>
@@ -66,8 +70,8 @@ export default function SavingsCounter({ savingsPct = 0, co2Saved = 0, totalEner
           <span>Baseline: <strong className="text-white">{baselineEnergy.toFixed(1)} kWh</strong></span>
         </div>
         <div className="h-3 bg-gray-700 rounded-full overflow-hidden flex">
-          <div className="h-full bg-green-500" style={{ width: `${(totalEnergy / Math.max(baselineEnergy, 1)) * 100}%` }} title="Actual Energy"></div>
-          <div className="h-full bg-gray-500/50" style={{ width: `${Math.max(0, 100 - (totalEnergy / Math.max(baselineEnergy, 1)) * 100)}%` }} title="Savings"></div>
+          <div className={`h-full ${reduction ? 'bg-green-500' : 'bg-red-500'}`} style={{ width: `${ratio}%` }} title="Actual Energy"></div>
+          <div className="h-full bg-gray-500/50" style={{ width: `${100 - ratio}%` }} title="Savings"></div>
         </div>
       </div>
     </div>

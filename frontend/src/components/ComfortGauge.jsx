@@ -19,7 +19,7 @@ export default function ComfortGauge({ comfortScore = 0, avgPmv = 0, avgPpd = 0 
       <h3 className="text-sm font-medium text-gray-400 absolute top-4 left-4">Occupant Comfort</h3>
       
       <div className={`absolute top-4 right-4 px-2 py-1 rounded text-[10px] font-bold border ${percentage >= 80 ? 'border-green-500/50 text-green-400 bg-green-500/10' : 'border-gray-500/50 text-gray-400 bg-gray-500/10'}`}>
-        ASHRAE 55
+        PMV / PPD
       </div>
 
       <div className="relative w-40 h-40 mt-4 flex items-center justify-center">

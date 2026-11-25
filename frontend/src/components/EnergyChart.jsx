@@ -13,6 +13,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import 'chartjs-adapter-date-fns';
+import { baselinePower } from '../utils/telemetry';
 
 ChartJS.register(
   CategoryScale,
@@ -55,10 +56,10 @@ export default function EnergyChart({ history }) {
           order: 2
         },
         {
-          label: 'Baseline (Est)',
+          label: 'Measured Baseline Power',
           data: recentHistory.map(h => ({
             x: new Date(h.sim_time),
-            y: h.hvac_power_kw / (1 - (h.energy_savings_pct || 10) / 100)
+            y: baselinePower(h)
           })),
           borderColor: 'rgba(156, 163, 175, 0.5)',
           borderDash: [5, 5],
