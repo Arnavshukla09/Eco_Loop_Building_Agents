@@ -217,6 +217,9 @@ async def test_mcp_direct_tools():
 @pytest.mark.asyncio
 async def test_all_mutating_endpoints_auth_matrix():
     """Verify all mutating REST endpoints enforce auth when API_KEY is set."""
+    from backend.controller import controller
+    from backend.energyplus_runner import SimulatedBuildingEnvironment
+    controller.env = SimulatedBuildingEnvironment(seed=42)
     original_key = settings.API_KEY
     try:
         settings.API_KEY = "vault-token-xyz"

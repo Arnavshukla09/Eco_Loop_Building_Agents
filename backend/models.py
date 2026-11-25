@@ -11,9 +11,11 @@ These are the single source of truth for data shapes across:
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
+from config.settings import settings
 
 # ── Zone-level state ──────────────────────────────────────────────────────────
 
@@ -54,6 +56,12 @@ class BuildingObservation(BaseModel):
     hvac_power_kw: float = Field(..., description="Instantaneous HVAC power draw (kW)")
     occupancy: float = Field(..., ge=0.0, le=1.0, description="Building occupancy ratio (0–1)")
     timestep: int = Field(default=0, description="Sequential timestep counter")
+    fan_speed: str = "medium"
+    fan_power_kw: float = 0.0
+    ventilation_m3s: float = 0.0
+    electricity_rate: float = 0.0
+    total_cost: float = 0.0
+    forecast: List[dict] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -125,6 +133,9 @@ class AgentDecision(BaseModel):
         default=0.0,
         description="Estimated energy saving versus baseline (%).",
     )
+    applied_setpoints: Optional[Dict[str, ZoneSetpoint]] = Field(
+        default=None, description="Successfully applied values after validation and slew limiting."
+    )
 
 
 # ── Metrics summary ───────────────────────────────────────────────────────────
@@ -141,6 +152,7 @@ class MetricsSummary(BaseModel):
     baseline_energy_kwh: float = Field(
         ..., description="Baseline energy usage (kWh)."
     )
+    baseline_power_kw: Optional[float] = None
     current_energy_kwh: float = Field(..., description="Actual cumulative energy (kWh).")
     co2_saved_kg: float = Field(..., description="Estimated CO₂ avoided (kg).")
     peak_demand_kw: float = Field(default=0.0)
@@ -162,6 +174,7 @@ class DashboardUpdate(BaseModel):
     ai_decision: Optional[AgentDecision] = None
     metrics: MetricsSummary
     simulation_mode: bool = True
+    control: dict = Field(default_factory=dict)
 
 
 class HistoryEntry(BaseModel):
@@ -177,6 +190,9 @@ class HistoryEntry(BaseModel):
     outdoor_temp: float
     occupancy: float
     ai_energy_mode: Optional[str] = None
+    baseline_power_kw: Optional[float] = None
+    total_cost: float = 0.0
+    fan_power_kw: float = 0.0
 
 
 # ── Setpoint Validation & Command ─────────────────────────────────────────────
@@ -188,6 +204,9 @@ def validate_setpoints(cooling: float, heating: float, zone: Optional[str] = Non
     Raises ValueError on validation failure.
     """
     from config.settings import settings
+
+    if not math.isfinite(cooling) or not math.isfinite(heating):
+        raise ValueError("Setpoints must be finite numbers.")
 
     if zone is not None and zone not in settings.ZONES:
         raise ValueError(f"Unknown zone '{zone}'. Valid zones: {settings.ZONES}")
@@ -221,6 +240,7 @@ class SetpointCommand(BaseModel):
     )
     cooling: float = Field(..., description="Cooling setpoint (°C)")
     heating: float = Field(..., description="Heating setpoint (°C)")
+    duration_minutes: int = Field(default_factory=lambda: settings.MANUAL_OVERRIDE_MINUTES, ge=1, le=1440, description="Manual hold duration in simulated minutes.")
 
     @model_validator(mode="after")
     def validate_canonical_limits(self) -> "SetpointCommand":

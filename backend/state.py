@@ -45,6 +45,7 @@ class BuildingStateStore:
         # Current state
         self._observation: Optional[BuildingObservation] = None
         self._decision: Optional[AgentDecision] = None
+        self._control: dict = {}
         self._simulation_running: bool = False
         self._llm_available: bool = False
         self._mcp_running: bool = False
@@ -53,6 +54,8 @@ class BuildingStateStore:
 
         # Baseline tracking (energy that WOULD have been used without AI)
         self._baseline_energy_kwh: float = 0.0
+        self._baseline_power_kw: Optional[float] = None
+        self._baseline_measured = False
         self._peak_demand_kw: float = 0.0
 
         # History ring-buffer
@@ -104,13 +107,24 @@ class BuildingStateStore:
                 outdoor_temp=obs.outdoor_temp,
                 occupancy=obs.occupancy,
                 ai_energy_mode=self._decision.energy_mode if self._decision else None,
+                baseline_power_kw=self._baseline_power_kw,
+                total_cost=obs.total_cost,
+                fan_power_kw=obs.fan_power_kw,
             )
             self._history.append(entry)
         self._notify()
 
-    def update_baseline_energy(self, baseline_kwh: float) -> None:
+    def update_baseline_energy(self, baseline_kwh: float, power_kw: Optional[float] = None) -> None:
         with self._lock:
             self._baseline_energy_kwh = baseline_kwh
+            self._baseline_power_kw = power_kw
+            self._baseline_measured = True
+
+    def clear_baseline(self) -> None:
+        with self._lock:
+            self._baseline_energy_kwh = 0.0
+            self._baseline_power_kw = None
+            self._baseline_measured = False
 
     # ── Decision updates ─────────────────────────────────────────────────────
 
@@ -119,11 +133,20 @@ class BuildingStateStore:
             self._decision = decision
         self._notify()
 
+    def update_control(self, control: dict) -> None:
+        with self._lock:
+            self._control = control
+        self._notify()
+
     # ── Status flags ─────────────────────────────────────────────────────────
 
     def set_simulation_running(self, running: bool) -> None:
         with self._lock:
             self._simulation_running = running
+
+    def set_simulation_mode(self, simulated: bool) -> None:
+        with self._lock:
+            self._simulation_mode = simulated
 
     def set_llm_available(self, available: bool) -> None:
         with self._lock:
@@ -165,6 +188,9 @@ class BuildingStateStore:
         with self._lock:
             self._history.clear()
             self._baseline_energy_kwh = 0.0
+            self._baseline_power_kw = None
+            self._baseline_measured = False
+            self._observation = None
             self._peak_demand_kw = 0.0
             self._decision = None
         self._notify()
@@ -193,10 +219,10 @@ class BuildingStateStore:
         comfort_score = max(0.0, 1.0 - avg_ppd / 100.0)
 
         # Baseline energy: use measured fixed-setpoint reference if available
-        if self._baseline_energy_kwh > 0.0:
+        if self._baseline_measured:
             baseline_kwh = self._baseline_energy_kwh
             baseline_mode = "measured"
-            savings_pct = (baseline_kwh - obs.total_energy_kwh) / baseline_kwh * 100.0
+            savings_pct = (baseline_kwh - obs.total_energy_kwh) / baseline_kwh * 100.0 if baseline_kwh > 0 else 0.0
             co2_saved = (baseline_kwh - obs.total_energy_kwh) * CO2_KG_PER_KWH
         else:
             # Baseline unmeasured or same as current at step 0
@@ -214,6 +240,7 @@ class BuildingStateStore:
             peak_demand_kw=round(self._peak_demand_kw, 2),
             avg_temp_c=round(obs.avg_temperature, 2),
             baseline_mode=baseline_mode,
+            baseline_power_kw=self._baseline_power_kw,
         )
 
     def get_metrics(self) -> Optional[MetricsSummary]:
@@ -234,6 +261,7 @@ class BuildingStateStore:
                 ai_decision=self._decision,
                 metrics=metrics,
                 simulation_mode=self._simulation_mode,
+                control=self._control,
             )
 
     # ── Setpoint convenience helper ──────────────────────────────────────────

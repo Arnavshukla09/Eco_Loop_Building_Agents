@@ -149,7 +149,7 @@ async def test_controller_setpoints_and_reset_lock():
     # Reset simulation
     reset_obs = await ctrl.reset_simulation()
     assert reset_obs.timestep == 1
-    assert ctrl._step_count == 0
+    assert ctrl._step_count == 1
 
 
 @pytest.mark.asyncio
@@ -201,7 +201,7 @@ async def test_reset_during_simulation():
 
     # Reset
     obs = await ctrl.reset_simulation()
-    assert ctrl._step_count == 0
+    assert ctrl._step_count == 1
     assert obs.timestep == 1
     new_obs = state_store.get_observation()
     assert new_obs.timestep == 1

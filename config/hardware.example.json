@@ -1,0 +1,9 @@
+{
+  "protocol": "modbus",
+  "host": "192.0.2.10",
+  "port": 502,
+  "device_id": 1,
+  "points": [
+    {"name": "Core.temperature_c", "address": 0, "scale": 0.1, "signed": true, "register_type": "input"}
+  ]
+}

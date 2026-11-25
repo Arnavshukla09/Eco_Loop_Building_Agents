@@ -36,8 +36,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
-from backend.models import BuildingObservation, ZoneState
+from backend.models import BuildingObservation, ZoneState, validate_setpoints
 from config.settings import settings
+from backend.forecast import electricity_rate, forecast_conditions
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,13 @@ def _pmv_ppd(air_temp: float, humidity: float, met: float = 1.1, clo: float = 0.
 # ══ Abstract base ═════════════════════════════════════════════════════════════
 
 class BuildingEnvironment(ABC):
+    async def set_fan_speed(self, speed: str) -> bool:
+        return False
+    async def initialize(self) -> None:
+        """Start resources needed by this environment."""
+
+    async def close(self) -> None:
+        """Release environment resources."""
     """Common interface for real and simulated building environments."""
 
     @abstractmethod
@@ -277,16 +285,19 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
     # ── Simulation start (January 1, 08:00) ─────────────────────────────────
     _SIM_START = datetime(2024, 1, 1, 8, 0, 0)
 
-    def __init__(self, is_baseline: bool = False, seed: Optional[int] = None) -> None:
-        self._rng       = random.Random(seed) if seed is not None else random.Random()
+    def __init__(self, is_baseline: bool = False, seed: Optional[int] = None, start_time: Optional[datetime] = None) -> None:
+        self.seed = settings.SIMULATION_SEED if seed is None else seed
+        self._rng       = random.Random(self.seed)
         self._is_baseline = is_baseline
-        self._weather   = WeatherModel(seed=seed)
+        self._weather   = WeatherModel(seed=self.seed)
         self._occupancy = OccupancySchedule()
         self._ts_min    = settings.TIMESTEP_MINUTES
         self._dt_s      = self._ts_min * 60.0          # timestep seconds
 
         # State
-        self._sim_dt    = self._SIM_START
+        self._sim_dt    = start_time or datetime.fromisoformat(settings.SIMULATION_START)
+        self._fan_speed = "medium"
+        self._cost = 0.0
         cool_init = settings.BASELINE_SETPOINT_COOLING if is_baseline else settings.COOLING_SETPOINT_DEFAULT
         heat_init = settings.BASELINE_SETPOINT_HEATING if is_baseline else settings.HEATING_SETPOINT_DEFAULT
 
@@ -351,6 +362,12 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
         with self._lock:
             return self._step_sync()
 
+    async def set_fan_speed(self, speed: str) -> bool:
+        if self._is_baseline or speed not in ("low", "medium", "high"):
+            return False
+        self._fan_speed = speed
+        return True
+
     def _step_sync(self) -> BuildingObservation:
         if self._weather_override is not None:
             outdoor_temp, outdoor_hum = self._weather_override
@@ -364,6 +381,8 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
 
         hvac_total_kw = 0.0
         zones: Dict[str, ZoneState] = {}
+        fan_total_kw = 0.0
+        ventilation_total = 0.0
 
         for zone in ZONES:
             raw_temp = self._temps[zone]
@@ -403,6 +422,23 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
 
             # ── Envelope loss ────────────────────────────────────────────────
             Q_env = -ENVELOPE_UA[zone] * (temp - outdoor_temp)
+            # Outdoor airflow follows area + occupants, with speed constrained by
+            # occupied ventilation minimum. Fan electricity follows the cube law.
+            airflow = 0.0
+            fan_kw = 0.0
+            if settings.FAN_MODEL_ENABLED:
+                full_flow = area * 0.006
+                required_oa = area * 0.0003 + area * ZONE_DENSITY * occupancy * 0.0025
+                requested = {"low": 0.35, "medium": 0.65, "high": 1.0}[self._fan_speed]
+                fraction = max(requested, min(1.0, required_oa / (full_flow * 0.2))) if occupancy >= 0.2 else requested
+                supply = full_flow * fraction
+                airflow = max(required_oa, supply * 0.2) if occupancy >= 0.2 else supply * 0.05
+                fan_kw = 0.8 * full_flow * fraction ** 3
+                # Sensible recovery of 70%; fan heat enters the zone.
+                Q_env += AIR_DENSITY * AIR_CP * airflow * (outdoor_temp - temp) * 0.3
+                Q_internal += fan_kw * 1000.0
+                fan_total_kw += fan_kw
+                ventilation_total += airflow
 
             # ── HVAC heat exchange ───────────────────────────────────────────
             Q_hvac    = 0.0
@@ -435,7 +471,7 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
 
             # Format raw sensor reading if fault occurred
             recorded_raw = None
-            if is_fault and raw_val is not None and not math.isnan(raw_val):
+            if is_fault and raw_val is not None and math.isfinite(raw_val):
                 recorded_raw = round(float(raw_val), 2)
 
             zones[zone] = ZoneState(
@@ -451,7 +487,10 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
             )
 
         # Cumulative energy
+        hvac_total_kw += fan_total_kw
         step_kwh           = hvac_total_kw * (self._ts_min / 60.0)
+        rate = electricity_rate(self._sim_dt)
+        self._cost += step_kwh * rate
         self._energy       += step_kwh
         wall_time           = datetime.now(timezone.utc)
         sim_time            = self._sim_dt
@@ -468,11 +507,21 @@ class SimulatedBuildingEnvironment(BuildingEnvironment):
             hvac_power_kw=round(hvac_total_kw, 2),
             occupancy=round(occupancy, 3),
             timestep=self._step_n,
+            fan_speed=self._fan_speed,
+            fan_power_kw=round(fan_total_kw, 4),
+            ventilation_m3s=round(ventilation_total, 4),
+            electricity_rate=rate,
+            total_cost=round(self._cost, 4),
+            forecast=forecast_conditions(sim_time, self._occupancy),
         )
 
     async def set_setpoint(self, zone: str, cooling: float, heating: float) -> bool:
         if self._is_baseline:
             logger.debug("Setpoint change rejected: environment is running fixed baseline.")
+            return False
+        try:
+            validate_setpoints(cooling, heating, zone)
+        except ValueError:
             return False
         if zone not in ZONES:
             logger.warning("Unknown zone: %s", zone)
@@ -535,6 +584,11 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
         self._lock   = threading.RLock()
         self._ready_event   = threading.Event()
         self._step_event    = threading.Event()
+        self._advance_event = threading.Event()
+        self._stopping = False
+        self._error: Optional[Exception] = None
+        self._delivered_step = 0
+        self._last_setpoints = {z: (settings.COOLING_SETPOINT_DEFAULT, settings.HEATING_SETPOINT_DEFAULT) for z in ZONES}
 
         # Shared buffer written by callback, read by step()
         self._latest_obs: Optional[BuildingObservation] = None
@@ -547,11 +601,16 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
         self._temp_handles:   Dict[str, int] = {}
         self._cool_sp_handles: Dict[str, int] = {}
         self._heat_sp_handles: Dict[str, int] = {}
+        self._cool_value_handles: Dict[str, int] = {}
+        self._heat_value_handles: Dict[str, int] = {}
+        self._ideal_heat_handles: Dict[str, int] = {}
+        self._ideal_cool_handles: Dict[str, int] = {}
 
         self._sim_thread: Optional[threading.Thread] = None
         self._is_ready = False
         self._step_n   = 0
         self._energy   = 0.0
+        self._meter_handle = -1
 
         logger.info("EnergyPlusBuildingEnvironment initialised (EP at %s).", ep_path)
 
@@ -569,56 +628,101 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
         )
         self._sim_thread.start()
         # Wait until the first callback fires and marks environment ready
-        self._ready_event.wait(timeout=30.0)
+        if not self._ready_event.wait(timeout=30.0) or not self._is_ready:
+            raise RuntimeError(f"EnergyPlus startup failed: {self._error or 'no ready observation within 30 seconds'}")
+
+    async def initialize(self) -> None:
+        try:
+            await asyncio.to_thread(self.start)
+        except Exception:
+            await self.close()
+            raise
+
+    async def close(self) -> None:
+        self._stopping = True
+        self._advance_event.set()
+        self._step_event.set()
+        self._api.runtime.stop_simulation(self._state)
+        if self._sim_thread is not None:
+            await asyncio.to_thread(self._sim_thread.join, 5.0)
+            if self._sim_thread.is_alive():
+                raise RuntimeError("EnergyPlus simulation thread did not stop.")
+        self._is_ready = False
 
     def _run_energyplus(self) -> None:
         api   = self._api
         state = self._state
 
         # Register callbacks
-        api.runtime.callback_begin_system_timestep_before_predictor(
-            state, self._timestep_callback
+        api.runtime.callback_begin_zone_timestep_before_init_heat_balance(
+            state, self._apply_pending_callback
         )
+        api.runtime.callback_end_zone_timestep_after_zone_reporting(state, self._timestep_callback)
+        for zone in ZONES:
+            api.exchange.request_variable(state, "Zone Mean Air Temperature", f"{zone} Zone")
+            api.exchange.request_variable(state, "Zone Thermostat Cooling Setpoint Temperature", f"{zone} Zone")
+            api.exchange.request_variable(state, "Zone Thermostat Heating Setpoint Temperature", f"{zone} Zone")
+            api.exchange.request_variable(state, "Zone Ideal Loads Supply Air Total Heating Energy", f"{zone} Ideal Loads")
+            api.exchange.request_variable(state, "Zone Ideal Loads Supply Air Total Cooling Energy", f"{zone} Ideal Loads")
+        api.exchange.request_variable(state, "Site Outdoor Air Drybulb Temperature", "Environment")
 
         args = [
-            "--idf",     settings.IDF_FILE,
             "--output-directory", "output",
         ]
         if settings.WEATHER_FILE:
             args += ["--weather", settings.WEATHER_FILE]
+        args.append(settings.IDF_FILE)
 
         logger.info("Starting EnergyPlus simulation …")
-        api.runtime.run_energyplus(state, args)
-        logger.info("EnergyPlus simulation completed.")
+        try:
+            result = api.runtime.run_energyplus(state, args)
+            if result:
+                raise RuntimeError(f"EnergyPlus exited with status {result}.")
+        except Exception as exc:
+            self._error = exc
+            logger.exception("EnergyPlus failed.")
+        finally:
+            self._ready_event.set()
+            self._step_event.set()
+            logger.info("EnergyPlus simulation completed.")
+
+    def _apply_pending_callback(self, state) -> None:
+        if not self._handles_init:
+            return
+        with self._lock:
+            pending = dict(self._pending_sp)
+            self._pending_sp.clear()
+        for zone, (cool, heat) in pending.items():
+            self._api.exchange.set_actuator_value(state, self._cool_sp_handles[zone], cool)
+            self._api.exchange.set_actuator_value(state, self._heat_sp_handles[zone], heat)
+            self._last_setpoints[zone] = (cool, heat)
 
     def _timestep_callback(self, state) -> None:
         api = self._api
         if not api.exchange.api_data_fully_ready(state):
             return
+        if api.exchange.warmup_flag(state) or self._stopping:
+            return
 
         # Initialise handles once
         if not self._handles_init:
-            self._init_handles(state)
+            try:
+                self._init_handles(state)
+            except Exception as exc:
+                self._error = exc
+                api.runtime.stop_simulation(state)
+                self._ready_event.set()
+                self._step_event.set()
+                return
             self._is_ready = True
-            self._ready_event.set()
-
-        # Apply pending setpoints
-        with self._lock:
-            pending = dict(self._pending_sp)
-            self._pending_sp.clear()
-
-        for zone, (cool, heat) in pending.items():
-            if zone in self._cool_sp_handles:
-                api.exchange.set_actuator_value(state, self._cool_sp_handles[zone], cool)
-                api.exchange.set_actuator_value(state, self._heat_sp_handles[zone], heat)
 
         # Read temperatures
         zones: Dict[str, ZoneState] = {}
         for zone in ZONES:
             temp = api.exchange.get_variable_value(state, self._temp_handles[zone])
             # Simplified – setpoints and comfort computed from last known values
-            sp_cool = api.exchange.get_variable_value(state, self._cool_sp_handles[zone])
-            sp_heat = api.exchange.get_variable_value(state, self._heat_sp_handles[zone])
+            sp_cool = api.exchange.get_variable_value(state, self._cool_value_handles[zone])
+            sp_heat = api.exchange.get_variable_value(state, self._heat_value_handles[zone])
             pmv, ppd = _pmv_ppd(temp, 50.0)
             zones[zone] = ZoneState(
                 zone_id=zone,
@@ -631,16 +735,26 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
             )
 
         # Read energy meter (convert J → kWh)
-        energy_j = api.exchange.get_meter_value(state, "Electricity:Facility")
-        self._energy = energy_j / 3_600_000.0
+        if getattr(self, "_ideal_heat_handles", None):
+            # IdealLoads reports thermal delivery, not compressor electricity.
+            # Convert explicitly using the same stated COP assumptions as the
+            # lightweight simulator; this is an electrical estimate, not a meter.
+            heat_j = sum(api.exchange.get_variable_value(state, h) for h in self._ideal_heat_handles.values())
+            cool_j = sum(api.exchange.get_variable_value(state, h) for h in self._ideal_cool_handles.values())
+            energy_j = heat_j / HVAC_COP_HEATING + cool_j / HVAC_COP_COOLING
+        else:
+            energy_j = api.exchange.get_meter_value(state, self._meter_handle)
+        self._energy += energy_j / 3_600_000.0
 
         # Current simulation time
         year  = api.exchange.year(state)
         month = api.exchange.month(state)
         day   = api.exchange.day_of_month(state)
-        hour  = api.exchange.hour(state)
-        minute= api.exchange.minutes(state)
-        sim_dt = datetime(year, month, day, hour, minute)
+        # HVAC adaptive substeps can leave minutes()/current_time() beyond the
+        # zone boundary after an actuator change (e.g. 00:32:08 for 00:30).
+        # Build the reporting time from the zone's discrete timestep instead.
+        zone_hour = api.exchange.hour(state) + api.exchange.zone_time_step_number(state) * api.exchange.zone_time_step(state)
+        sim_dt = datetime(max(1, year), month, day) + timedelta(hours=zone_hour)
 
         self._step_n += 1
         obs = BuildingObservation(
@@ -650,18 +764,22 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
             outdoor_temp=api.exchange.get_variable_value(state, self._outdoor_temp_handle),
             outdoor_humidity=50.0,
             total_energy_kwh=round(self._energy, 3),
-            hvac_power_kw=0.0,     # not easily available per-timestep from meter
+            hvac_power_kw=energy_j / max(api.exchange.zone_time_step(state) * 3600.0, 1.0) / 1000.0,
             occupancy=0.8,
             timestep=self._step_n,
         )
         with self._lock:
             self._latest_obs = obs
         self._step_event.set()
+        self._ready_event.set()
+        # Pause at a completed zone timestep until the controller requests another.
+        self._advance_event.wait()
+        self._advance_event.clear()
 
     def _init_handles(self, state) -> None:
         api = self._api
         for zone in ZONES:
-            ep_zone = zone.replace("_", " ")
+            ep_zone = f"{zone} Zone"
             self._temp_handles[zone] = api.exchange.get_variable_handle(
                 state, "Zone Mean Air Temperature", ep_zone
             )
@@ -671,35 +789,51 @@ class EnergyPlusBuildingEnvironment(BuildingEnvironment):
             self._heat_sp_handles[zone] = api.exchange.get_actuator_handle(
                 state, "Zone Temperature Control", "Heating Setpoint", ep_zone
             )
+            self._cool_value_handles[zone] = api.exchange.get_variable_handle(state, "Zone Thermostat Cooling Setpoint Temperature", ep_zone)
+            self._heat_value_handles[zone] = api.exchange.get_variable_handle(state, "Zone Thermostat Heating Setpoint Temperature", ep_zone)
+            if hasattr(self, "_ideal_heat_handles"):
+                self._ideal_heat_handles[zone] = api.exchange.get_variable_handle(state, "Zone Ideal Loads Supply Air Total Heating Energy", f"{zone} Ideal Loads")
+                self._ideal_cool_handles[zone] = api.exchange.get_variable_handle(state, "Zone Ideal Loads Supply Air Total Cooling Energy", f"{zone} Ideal Loads")
         self._outdoor_temp_handle = api.exchange.get_variable_handle(
             state, "Site Outdoor Air Drybulb Temperature", "Environment"
         )
+        self._meter_handle = api.exchange.get_meter_handle(state, "Electricity:Facility")
+        energy_handles = [*self._ideal_heat_handles.values(), *self._ideal_cool_handles.values()] if hasattr(self, "_ideal_heat_handles") else [self._meter_handle]
+        handles = [*self._temp_handles.values(), *self._cool_sp_handles.values(), *self._heat_sp_handles.values(), *self._cool_value_handles.values(), *self._heat_value_handles.values(), self._outdoor_temp_handle, *energy_handles]
+        if any(handle < 0 for handle in handles):
+            raise RuntimeError(f"EnergyPlus model is missing required handles: temperatures={self._temp_handles}, cooling={self._cool_sp_handles}, heating={self._heat_sp_handles}, cool_values={self._cool_value_handles}, heat_values={self._heat_value_handles}, outdoor={self._outdoor_temp_handle}, meter={self._meter_handle}")
         self._handles_init = True
         logger.info("EnergyPlus API handles initialised for %d zones.", len(ZONES))
 
     async def step(self) -> BuildingObservation:
         """Wait for EnergyPlus to complete its next timestep and return the observation."""
-        self._step_event.clear()
+        if self._delivered_step:
+            self._step_event.clear()
+            self._advance_event.set()
         # Wait in executor so we don't block the event loop
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._step_event.wait, 30.0)
+        ready = await loop.run_in_executor(None, self._step_event.wait, 30.0)
         with self._lock:
             obs = self._latest_obs
-        if obs is None:
-            raise RuntimeError("EnergyPlus did not produce an observation within timeout.")
+        if self._error:
+            raise RuntimeError("EnergyPlus simulation failed.") from self._error
+        if not ready or obs is None or obs.timestep <= self._delivered_step:
+            raise RuntimeError("EnergyPlus did not produce a new observation (timeout or end of simulation).")
+        self._delivered_step = obs.timestep
         return obs
 
     async def set_setpoint(self, zone: str, cooling: float, heating: float) -> bool:
-        if zone not in ZONES:
+        try:
+            validate_setpoints(cooling, heating, zone)
+        except ValueError:
             return False
         with self._lock:
             self._pending_sp[zone] = (cooling, heating)
         return True
 
     async def set_all_setpoints(self, cooling: float, heating: float) -> None:
-        with self._lock:
-            for zone in ZONES:
-                self._pending_sp[zone] = (cooling, heating)
+        for zone in ZONES:
+            await self.set_setpoint(zone, cooling, heating)
 
 
 # ══ Factory ════════════════════════════════════════════════════════════════════

@@ -55,10 +55,12 @@ class Settings(BaseSettings):
     )
     TIMESTEP_MINUTES: int = Field(
         default=15,
+        gt=0,
         description="Simulation timestep in minutes.",
     )
     SPEEDUP_FACTOR: float = Field(
         default=60.0,
+        ge=1.0, le=3600.0, allow_inf_nan=False,
         description=(
             "Simulation speedup factor (ratio of simulated seconds to wall-clock seconds). "
             "Default (60.0) means 1 wall-clock second represents 60 simulated seconds "
@@ -101,29 +103,45 @@ class Settings(BaseSettings):
     # ── Control loop ──────────────────────────────────────────────────────────
     AGENT_INTERVAL_SECONDS: float = Field(
         default=30.0,
+        gt=0.0, allow_inf_nan=False,
         description="How often (wall-clock seconds) the AI agent runs a control cycle.",
     )
 
+    SIMULATION_SEED: int = Field(default=42, description="Shared active/reference simulation seed.")
+    SIMULATION_START: str = "2024-01-01T08:00:00"
+    CONTROL_PROVIDER: str = Field(default="hybrid", pattern="^(hybrid|rule_based|forecast|scheduled)$")
+    TARIFF_OFFPEAK: float = Field(default=0.10, ge=0)
+    TARIFF_PEAK: float = Field(default=0.25, ge=0)
+    TARIFF_PEAK_START: int = Field(default=16, ge=0, le=23)
+    TARIFF_PEAK_END: int = Field(default=21, ge=1, le=24)
+    TARIFF_CURRENCY: str = "USD"
+    MANUAL_OVERRIDE_MINUTES: int = Field(default=60, ge=1, le=1440)
+    FAN_MODEL_ENABLED: bool = True
+
     # ── MCP Server ────────────────────────────────────────────────────────────
-    MCP_HOST: str = Field(default="0.0.0.0")
+    MCP_HOST: str = Field(default="127.0.0.1")
     MCP_PORT: int = Field(default=8001)
 
     # ── FastAPI / WebSocket ───────────────────────────────────────────────────
     ENVIRONMENT: str = Field(
         default="development",
+        pattern="^(development|dev|staging|production|prod)$",
         description="Deployment environment: 'development', 'staging', or 'production'. In production, mutating operations fail-closed if API_KEY is unset.",
     )
     REQUIRE_API_KEY: bool = Field(
         default=False,
         description="Enforce API key authentication even when ENVIRONMENT is development.",
     )
-    API_HOST: str = Field(default="0.0.0.0")
+    API_HOST: str = Field(default="127.0.0.1")
     API_PORT: int = Field(default=8000)
     API_KEY: Optional[str] = Field(
         default=None,
         description="Optional API key for mutating control endpoints. If set, requires 'Authorization: Bearer <key>'",
     )
-    CORS_ORIGINS: List[str] = Field(default=["*"])
+    CORS_ORIGINS: List[str] = Field(default=[
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:5174", "http://127.0.0.1:5174",
+    ])
     WS_BROADCAST_INTERVAL: float = Field(
         default=2.0,
         description="Seconds between WebSocket state broadcasts to the dashboard.",

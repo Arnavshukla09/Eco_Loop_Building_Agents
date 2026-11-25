@@ -66,6 +66,8 @@ def _format_observation(obs: BuildingObservation, history: List[HistoryEntry]) -
         f"=== Building Snapshot (Sim Time: {obs.simulation_time.strftime('%Y-%m-%d %H:%M')}) ===",
         f"Outdoor: {obs.outdoor_temp:.1f}°C | Humidity: {obs.outdoor_humidity:.0f}% | Occupancy: {obs.occupancy * 100:.0f}%",
         f"Cumulative Energy: {obs.total_energy_kwh:.1f} kWh | HVAC Power: {obs.hvac_power_kw:.1f} kW",
+        f"Electricity rate: {obs.electricity_rate:.3f} {settings.TARIFF_CURRENCY}/kWh | Current fan: {obs.fan_speed}",
+        "Synthetic weather / scheduled occupancy forecast: " + json.dumps(obs.forecast),
         "",
         "Zone Status:",
         f"{'Zone':<15} {'Temp (°C)':<12} {'Cool SP':<10} {'Heat SP':<10} {'PMV':<8} {'PPD %':<8} {'Humidity %'}",
@@ -100,9 +102,9 @@ def _rule_based_decision(obs: BuildingObservation) -> AgentDecision:
     occupancy = obs.occupancy
 
     for name, zone in obs.zones.items():
-        # Start with current setpoints
-        cool = zone.setpoint_cooling
-        heat = zone.setpoint_heating
+        # Absolute schedule anchors avoid accumulating unoccupied setbacks across
+        # days and failing to restore comfort on the next occupied morning.
+        cool, heat = (24.0, 20.5) if occupancy >= 0.2 else (28.0, 17.0)
 
         # Adjust for outdoor temp
         if outdoor > 28.0:
@@ -115,10 +117,10 @@ def _rule_based_decision(obs: BuildingObservation) -> AgentDecision:
             cool = min(cool + 1.0, settings.COOLING_SETPOINT_MAX)
             heat = max(heat - 1.0, settings.HEATING_SETPOINT_MIN)
 
-        # Tighten for comfort if PMV is far off
-        if zone.pmv_score > 1.0:
+        # Occupied comfort takes priority over weather compensation.
+        if occupancy >= 0.2 and zone.pmv_score > 0.5:
             cool = max(cool - 0.5, settings.COOLING_SETPOINT_MIN)
-        elif zone.pmv_score < -1.0:
+        elif occupancy >= 0.2 and zone.pmv_score < -0.5:
             heat = min(heat + 0.5, settings.HEATING_SETPOINT_MAX)
 
         # Maintain gap
@@ -162,7 +164,8 @@ class BuildingAIAgent(BaseDecisionProvider):
         self._decision_count = 0
         self._last_health_check_time: float = 0.0
 
-        self._initialise_client()
+        # Importing the module must not perform network I/O. Availability is
+        # verified asynchronously on the first decision, including recovery.
 
     @property
     def name(self) -> str:
@@ -178,10 +181,10 @@ class BuildingAIAgent(BaseDecisionProvider):
     def _initialise_client(self) -> None:
         try:
             import ollama  # type: ignore
-            client = ollama.Client(host=self._host)
+            client = ollama.Client(host=self._host, timeout=3.0)
             models = client.list()
             available_models = [m.model for m in models.models] if hasattr(models, "models") else []
-            has_model = any(self._model == m or self._model in m or m.startswith(self._model.split(":")[0]) for m in available_models)
+            has_model = (self._model if ":" in self._model else self._model + ":latest") in available_models
             if not has_model:
                 logger.warning(
                     "Configured model '%s' not found in Ollama (available: %s). Running in rule-based fallback.",
@@ -212,7 +215,7 @@ class BuildingAIAgent(BaseDecisionProvider):
             client = ollama.AsyncClient(host=self._host)
             models = await asyncio.wait_for(client.list(), timeout=3.0)
             available_models = [m.model for m in models.models] if hasattr(models, "models") else []
-            has_model = any(self._model == m or self._model in m or m.startswith(self._model.split(":")[0]) for m in available_models)
+            has_model = (self._model if ":" in self._model else self._model + ":latest") in available_models
 
             if not has_model:
                 if self._available:

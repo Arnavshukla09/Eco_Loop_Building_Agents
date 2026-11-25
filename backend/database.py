@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import declarative_base
+from sqlalchemy import inspect, text
 
 from config.settings import settings
 
@@ -80,6 +81,8 @@ async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from backend.migrations import migrate
+        await migrate(conn)
     logger.info("Database schema verified and created.")
 
 

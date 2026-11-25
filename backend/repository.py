@@ -97,6 +97,9 @@ class DatabaseRepository:
                 wall_time=entry.wall_time,
                 avg_temp=entry.avg_temp,
                 hvac_power_kw=entry.hvac_power_kw,
+                baseline_power_kw=entry.baseline_power_kw,
+                total_cost=entry.total_cost,
+                fan_power_kw=entry.fan_power_kw,
                 total_energy_kwh=entry.total_energy_kwh,
                 comfort_score=entry.comfort_score,
                 energy_savings_pct=entry.energy_savings_pct,
@@ -116,7 +119,7 @@ class DatabaseRepository:
         """Persist an agent decision record for auditability with verified actuation status."""
         setpoints_dict = {
             zone: {"cooling": sp.cooling, "heating": sp.heating}
-            for zone, sp in decision.zone_setpoints.items()
+            for zone, sp in (decision.applied_setpoints if decision.applied_setpoints is not None else decision.zone_setpoints).items()
         }
         async with get_db_session() as session:
             record = DecisionRecordModel(
@@ -131,6 +134,7 @@ class DatabaseRepository:
                 reasoning=decision.reasoning,
                 actuation_status=actuation_status,
                 zone_setpoints_json=json.dumps(setpoints_dict),
+                requested_setpoints_json=json.dumps({zone: {"cooling": sp.cooling, "heating": sp.heating} for zone, sp in decision.zone_setpoints.items()}),
             )
             session.add(record)
 
@@ -151,6 +155,9 @@ class DatabaseRepository:
                 wall_time=r.wall_time,
                 avg_temp=r.avg_temp,
                 hvac_power_kw=r.hvac_power_kw,
+                baseline_power_kw=r.baseline_power_kw,
+                total_cost=r.total_cost or 0.0,
+                fan_power_kw=r.fan_power_kw or 0.0,
                 total_energy_kwh=r.total_energy_kwh,
                 comfort_score=r.comfort_score,
                 energy_savings_pct=r.energy_savings_pct,
@@ -183,6 +190,12 @@ class DatabaseRepository:
             }
             for r in runs
         ]
+
+    async def get_decisions(self, run_id: str, limit: int = 100) -> List[dict]:
+        async with get_db_session() as session:
+            result = await session.execute(select(DecisionRecordModel).where(DecisionRecordModel.run_id == run_id).order_by(desc(DecisionRecordModel.id)).limit(limit))
+            records = result.scalars().all()
+        return [{"timestep": r.timestep, "timestamp": r.timestamp.isoformat(), "source": r.controller_source, "reasoning": r.reasoning, "status": r.actuation_status, "applied_setpoints": json.loads(r.zone_setpoints_json), "requested_setpoints": json.loads(r.requested_setpoints_json) if r.requested_setpoints_json else None} for r in reversed(records)]
 
 
 repository = DatabaseRepository()

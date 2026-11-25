@@ -19,11 +19,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+from pathlib import Path
 import json
 import logging
 import math
-import os
-import shutil
 import statistics
 import time
 from datetime import datetime, timezone
@@ -40,6 +39,7 @@ logging.getLogger("backend").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 
 from backend.models import AgentDecision, BuildingObservation
+from backend.controller import AutonomousController
 from backend.energyplus_runner import SimulatedBuildingEnvironment
 from backend.llm_agent import _rule_based_decision, _format_observation, _SYSTEM_PROMPT, BuildingAIAgent
 from backend.state import state_store, CO2_KG_PER_KWH
@@ -96,6 +96,7 @@ async def real_llm_call(
     if fault_mode == "corrupt":
         # Production provider fallback path test: malformed LLM response processed via BuildingAIAgent
         agent = BuildingAIAgent()
+        agent._available = True
         with patch.object(agent, "_call_ollama_async", AsyncMock(return_value='{"zone_setpoints": { MALFORMED_JSON')):
             decision = await agent.analyze_and_decide(obs)
             assert decision.controller_source == "fallback"
@@ -144,8 +145,15 @@ async def run_scenario(
       - 'rule_based': Dynamic controller using rule-based algorithm.
       - 'ai': Local LLM agent (or rule-based fallback if Ollama unavailable).
     """
+    if steps < 1:
+        raise ValueError("steps must be positive")
     is_baseline = (mode == "baseline")
     env = SimulatedBuildingEnvironment(is_baseline=is_baseline, seed=seed)
+    # Share the live control envelope, including fan actuation, without starting
+    # background loops or creating/writing a database run.
+    ctrl = AutonomousController()
+    ctrl.env = env
+    state_store.reset()
 
     energy_history: List[float] = []
     power_history: List[float] = []
@@ -164,7 +172,7 @@ async def run_scenario(
 
     for _ in range(steps):
         obs = await env.step()
-        state_store.update_observation(obs)
+        state_store.update_observation(obs.model_copy(deep=True))
         t0 = time.monotonic()
 
         if is_baseline:
@@ -200,21 +208,17 @@ async def run_scenario(
                     decision = _rule_based_decision(obs)
             else:
                 decision = _rule_based_decision(obs)
-                fallback_calls += 1
+                if mode != "rule_based":
+                    fallback_calls += 1
                 successes += 1
 
             if decision is not None:
-                MAX_DELTA = 2.0
-                for zone, sp in decision.zone_setpoints.items():
-                    curr_cool = env._sp_cool[zone]
-                    curr_heat = env._sp_heat[zone]
-                    if abs(sp.cooling - curr_cool) > 0.1 or abs(sp.heating - curr_heat) > 0.1:
+                await ctrl._apply_decision(decision)
+                for zone, sp in (decision.applied_setpoints or {}).items():
+                    previous = obs.zones[zone]
+                    if abs(sp.cooling - previous.setpoint_cooling) > 0.1 or abs(sp.heating - previous.setpoint_heating) > 0.1:
                         setpoint_changes_count += 1
-                    target_cool = max(curr_cool - MAX_DELTA, min(curr_cool + MAX_DELTA, sp.cooling))
-                    target_heat = max(curr_heat - MAX_DELTA, min(curr_heat + MAX_DELTA, sp.heating))
-                    if target_cool < target_heat + 1.5:
-                        target_cool = min(settings.COOLING_SETPOINT_MAX, target_heat + 1.5)
-                    await env.set_setpoint(zone, round(target_cool, 1), round(target_heat, 1))
+                state_store.update_decision(decision)
 
             latencies.append(time.monotonic() - t0)
 
@@ -232,7 +236,7 @@ async def run_scenario(
 
     # Accurate controller attribution
     if is_baseline:
-        controller_name = "Fixed Baseline (22/21°C)"
+        controller_name = f"Fixed Baseline ({settings.BASELINE_SETPOINT_COOLING:g}/{settings.BASELINE_SETPOINT_HEATING:g}°C)"
     elif mode == "rule_based" or ollama_client is None:
         controller_name = "Rule-Based Dynamic Controller"
     elif llm_calls_succeeded > 0 and fallback_calls == 0:
@@ -251,6 +255,7 @@ async def run_scenario(
         "fallback_calls": fallback_calls,
         "setpoint_changes_count": setpoint_changes_count,
         "total_energy_kwh": energy_history[-1],
+        "final_fan_speed": env._fan_speed,
         "peak_demand_kw": max(power_history) if power_history else 0.0,
         "energy_history": energy_history,
         "power_history": power_history,
@@ -279,9 +284,22 @@ def safe_pct(base_val: float, ctrl_val: float) -> float:
 async def eval_mcp_tools(repetitions: int = 50) -> List[dict]:
     """
     Benchmark in-process Python function execution latency of all 10 MCP tool functions (N=50 runs).
-    Note: Real MCP clients communicating over stdio/SSE JSON-RPC transport will incur
-    additional IPC/network and JSON serialization overhead (~1-5 ms).
+    Transport serialization and network latency are not measured here.
     """
+    from backend.controller import controller
+    original = (controller.env, controller.baseline_env, controller._current_run_id, controller._step_count)
+    controller.env = SimulatedBuildingEnvironment(seed=42)
+    controller.baseline_env = SimulatedBuildingEnvironment(is_baseline=True, seed=42)
+    controller._current_run_id = None
+    await controller.step_simulation()
+    state_store.update_decision(_rule_based_decision(state_store.get_observation()))
+    try:
+        return await _benchmark_mcp_tools(repetitions)
+    finally:
+        controller.env, controller.baseline_env, controller._current_run_id, controller._step_count = original
+
+
+async def _benchmark_mcp_tools(repetitions: int) -> List[dict]:
     tools = {
         "read_building_state": read_building_state,
         "get_hvac_setpoints": get_hvac_setpoints,
@@ -302,6 +320,8 @@ async def eval_mcp_tools(repetitions: int = 50) -> List[dict]:
             kwargs = {"zone": "Core", "cooling_c": 24.0, "heating_c": 20.0}
         elif name == "update_all_setpoints":
             kwargs = {"cooling_c": 24.0, "heating_c": 20.0}
+        if name in ("update_setpoint", "update_all_setpoints", "run_simulation_step"):
+            kwargs["api_key"] = settings.API_KEY
 
         times_ms = []
         status = "Success"
@@ -309,9 +329,11 @@ async def eval_mcp_tools(repetitions: int = 50) -> List[dict]:
             t0 = time.perf_counter_ns()
             try:
                 if inspect.iscoroutinefunction(fn):
-                    await fn(**kwargs)
+                    result = await fn(**kwargs)
                 else:
-                    fn(**kwargs)
+                    result = fn(**kwargs)
+                if isinstance(result, dict) and (result.get("success") is False or "error" in result):
+                    raise RuntimeError(result.get("error", "Tool returned success=false"))
             except Exception as e:
                 status = f"Failed: {e}"
             elapsed_ms = (time.perf_counter_ns() - t0) / 1_000_000.0
@@ -343,12 +365,21 @@ async def main():
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
     steps = args.steps
-    output_file = args.output
+    if steps < 1 or not seeds:
+        parser.error("--steps must be positive and --seeds must contain at least one integer")
+    duration_hours = steps * settings.TIMESTEP_MINUTES / 60
+    duration_label = f"{duration_hours:g}-Hour"
+    baseline_label = f"Fixed {settings.BASELINE_SETPOINT_COOLING:g}/{settings.BASELINE_SETPOINT_HEATING:g}°C"
+    slice_start = datetime.fromisoformat(settings.SIMULATION_START).strftime("%Y-%m-%d %H:%M")
+    output_file = Path(args.output)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    results_file = output_file.parent / "evaluation_results.json"
+    plot_file = output_file.parent / "energy_comparison.png"
     eval_mode = args.mode
 
     print("=" * 65)
     print("  Honeywell Eco-Loop — Empirical Evaluation Harness")
-    print(f"  Configuration: {steps} steps (24h) | Seeds: {seeds} | Mode: {eval_mode}")
+    print(f"  Configuration: {steps} steps ({duration_hours:g}h) | Seeds: {seeds} | Mode: {eval_mode}")
     print("=" * 65)
 
     ollama_up = _ollama_available()
@@ -359,18 +390,20 @@ async def main():
             import ollama as _ollama
             client = _ollama.Client(host=settings.OLLAMA_HOST, timeout=5.0)
             models = [m.model for m in client.list().models]
-            if settings.LLM_MODEL in models or any(settings.LLM_MODEL in m for m in models):
+            if (settings.LLM_MODEL if ":" in settings.LLM_MODEL else settings.LLM_MODEL + ":latest") in models:
                 print(f"[OK] Ollama reachable at {settings.OLLAMA_HOST} — Verified model: {settings.LLM_MODEL}")
                 ollama_client = client
         except Exception:
             pass
 
+    if eval_mode == "auto":
+        eval_mode = "ai" if ollama_client is not None else "rule_based"
     if eval_mode == "ai":
         if ollama_client is None:
             print(f"[NOTE] Model '{settings.LLM_MODEL}' not available. Using rule-based fallback.")
             eval_mode = "rule_based"
     else:
-        print("[INFO] Multi-seed 24h evaluation using Rule-Based Dynamic Controller.")
+        print(f"[INFO] Multi-seed {duration_hours:g}h evaluation using Rule-Based Dynamic Controller.")
         eval_mode = "rule_based"
 
     # ── Multi-seed evaluation ────────────────────────────────────────────────
@@ -470,10 +503,14 @@ async def main():
         polar_obs = await polar_env.step()
     polar_passed = bool(all(z.temperature >= 16.0 for z in polar_obs.zones.values()))
 
-    # Actuation verification under fallback
-    fallback_applied_passed = (
-        all(sensor_env._sp_cool[z] >= sensor_env._sp_heat[z] + 1.5 for z in settings.ZONES)
-    )
+    # Verify a fallback decision changes actual actuator values.
+    sensor_env.inject_occupancy_override(0.0)
+    fallback_obs = await sensor_env.step()
+    fallback_decision = _rule_based_decision(fallback_obs)
+    fallback_applied_passed = True
+    for zone, sp in fallback_decision.zone_setpoints.items():
+        ok = await sensor_env.set_setpoint(zone, sp.cooling, sp.heating)
+        fallback_applied_passed = fallback_applied_passed and ok and sensor_env._sp_cool[zone] == sp.cooling and sensor_env._sp_heat[zone] == sp.heating
 
     # ── Priority 5: MCP In-Process Latency (N=50 runs) ───────────────────────
     print("Benchmarking 10 registered MCP tools (N=50 runs each)...")
@@ -489,10 +526,10 @@ async def main():
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     ax1 = axes[0]
-    ax1.plot(sample_run["baseline"]["energy_history"], label="Fixed-Setpoint Baseline (22/21°C)", color="#6B7280", linestyle="--", linewidth=2)
+    ax1.plot(sample_run["baseline"]["energy_history"], label=f"Fixed-Setpoint Baseline ({baseline_label})", color="#6B7280", linestyle="--", linewidth=2)
     ax1.plot(sample_run["controlled"]["energy_history"], label="EcoLoop Controller", color="#FF6B1A", linewidth=2.5)
-    ax1.set_title("24-Hour Energy Consumption Trajectory (Seed 42)", fontsize=12, fontweight="bold")
-    ax1.set_xlabel("Simulation Timestep (15 min each)")
+    ax1.set_title(f"{duration_label} Energy Consumption Trajectory (Seed {sample_run['seed']})", fontsize=12, fontweight="bold")
+    ax1.set_xlabel(f"Simulation Timestep ({settings.TIMESTEP_MINUTES} min each)")
     ax1.set_ylabel("Cumulative Energy (kWh)")
     ax1.legend(loc="upper left")
     ax1.grid(True, alpha=0.3)
@@ -507,19 +544,13 @@ async def main():
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("energy_comparison.png", dpi=150)
-    artifact_dir = r"C:\Users\aarrn\.gemini\antigravity\brain\cfdd6f54-16e7-4188-b429-1dcd152ab963"
-    if os.path.isdir(artifact_dir):
-        try:
-            shutil.copy("energy_comparison.png", os.path.join(artifact_dir, "energy_comparison.png"))
-        except Exception:
-            pass
+    plt.savefig(plot_file, dpi=150)
     plt.close()
 
     active_ctrl_desc = (
         "Rule-Based Dynamic Controller (Deterministic Algorithm)"
         if eval_mode == "rule_based" or ollama_client is None
-        else f"Qwen2.5 LLM ({settings.LLM_MODEL} via Ollama)"
+        else f"LLM ({settings.LLM_MODEL} via Ollama; {sum(r['controlled']['fallback_calls'] for r in multi_seed_results)} fallback decisions)"
     )
 
     # ── Save JSON raw results ────────────────────────────────────────────────
@@ -527,6 +558,10 @@ async def main():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "configuration": {
             "steps": steps,
+            "timestep_minutes": settings.TIMESTEP_MINUTES,
+            "duration_hours": duration_hours,
+            "simulation_start": settings.SIMULATION_START,
+            "fan_model_enabled": settings.FAN_MODEL_ENABLED,
             "seeds": seeds,
             "ollama_available": ollama_up,
             "active_controller": active_ctrl_desc,
@@ -612,31 +647,31 @@ async def main():
             "fallback_actuation_applied": fallback_applied_passed,
         },
     }
-    with open("evaluation_results.json", "w", encoding="utf-8") as f:
+    with open(results_file, "w", encoding="utf-8") as f:
         json.dump(raw_payload, f, indent=2)
 
     # ── Write Markdown Report ────────────────────────────────────────────────
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("# Eco-Loop System Evaluation Report\n\n")
         f.write(f"> **Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  \n")
-        f.write(f"> **Evaluation Scope:** 1 Full Day ({steps} timesteps × 15 min) | Seeds: `{seeds}` | CO₂ Factor: {CO2_KG_PER_KWH} kg/kWh  \n")
+        f.write(f"> **Evaluation Scope:** {duration_hours:g} simulated hours ({steps} timesteps × {settings.TIMESTEP_MINUTES} min) | Seeds: `{seeds}` | CO₂ Factor: {CO2_KG_PER_KWH} kg/kWh  \n")
         f.write(f"> **Active Dynamic Controller Under Test:** `{active_ctrl_desc}`\n\n")
 
         f.write("## 1. Executive Summary & Balanced Baseline Comparison\n\n")
-        f.write("This evaluation measures the performance of the Eco-Loop autonomous controller against a true fixed-setpoint reference baseline (cooling 22.0°C, heating 21.0°C). All initial conditions, thermal envelope parameters, and weather time-series are identically matched across seeds.\n\n")
+        f.write(f"This evaluation measures the performance of the Eco-Loop autonomous controller against a fixed-setpoint reference baseline (cooling {settings.BASELINE_SETPOINT_COOLING:g}°C, heating {settings.BASELINE_SETPOINT_HEATING:g}°C). Thermal state, envelope parameters, weather, and occupancy are matched by seed; setpoints differ by controller. The live controller's validation, slew limits, and fan actuation are used.\n\n")
 
         hvac_table = [
-            ["Metric", "Reference Baseline (Fixed 22/21°C)", "Eco-Loop Controlled", "Delta / Impact"],
-            ["Total Energy (Mean ± Std)", f"{avg_base_kwh:.2f} ± {std_base_kwh:.2f} kWh", f"{avg_ctrl_kwh:.2f} ± {std_ctrl_kwh:.2f} kWh", f"-{avg_savings_pct:.2f}% ± {std_savings:.2f}% energy"],
-            ["Peak Electrical Demand", f"{statistics.mean([r['baseline']['peak_demand_kw'] for r in multi_seed_results]):.2f} kW", f"{statistics.mean([r['controlled']['peak_demand_kw'] for r in multi_seed_results]):.2f} kW", f"-{avg_peak_red:.2f}% demand reduction"],
-            ["Avoided CO₂ Emissions (24 h)", "Reference (0.00 kg)", f"{mean_co2_avoided:.2f} kg", f"{mean_co2_avoided:+.2f} kg avoided"],
-            ["ASHRAE 55 Comfort (|PMV| ≤ 0.5)", f"{avg_base_comfort:.1f}% ± {std_base_comfort:.1f}%", f"{avg_ctrl_comfort:.1f}% ± {std_ctrl_comfort:.1f}%", f"{avg_ctrl_comfort - avg_base_comfort:+.1f} percentage points"],
+            ["Metric", f"Reference Baseline ({baseline_label})", "Eco-Loop Controlled", "Delta / Impact"],
+            ["Total Energy (Mean ± Std)", f"{avg_base_kwh:.2f} ± {std_base_kwh:.2f} kWh", f"{avg_ctrl_kwh:.2f} ± {std_ctrl_kwh:.2f} kWh", f"{-avg_savings_pct:+.2f}% ± {std_savings:.2f}% energy change"],
+            ["Peak Electrical Demand", f"{statistics.mean([r['baseline']['peak_demand_kw'] for r in multi_seed_results]):.2f} kW", f"{statistics.mean([r['controlled']['peak_demand_kw'] for r in multi_seed_results]):.2f} kW", f"{-avg_peak_red:+.2f}% demand change"],
+            [f"Avoided CO₂ Emissions ({duration_hours:g} h)", "Reference (0.00 kg)", f"{mean_co2_avoided:.2f} kg", f"{mean_co2_avoided:+.2f} kg avoided"],
+            ["PMV Comfort Target (|PMV| ≤ 0.5)", f"{avg_base_comfort:.1f}% ± {std_base_comfort:.1f}%", f"{avg_ctrl_comfort:.1f}% ± {std_ctrl_comfort:.1f}%", f"{avg_ctrl_comfort - avg_base_comfort:+.1f} percentage points"],
             ["Mean PMV (Comfort Index)", f"{avg_base_pmv:+.3f}", f"{avg_ctrl_pmv:+.3f}", f"{abs(avg_ctrl_pmv) - abs(avg_base_pmv):+.3f} drift from neutral"],
             ["Predicted Dissatisfied (PPD)", f"{avg_base_ppd:.1f}%", f"{avg_ctrl_ppd:.1f}%", f"{avg_ctrl_ppd - avg_base_ppd:+.1f} points"],
         ]
         f.write(tabulate(hvac_table[1:], headers=hvac_table[0], tablefmt="github") + "\n\n")
 
-        f.write("### Multi-Seed Breakdown (24-Hour Simulation Across Seeds)\n\n")
+        f.write(f"### Multi-Seed Breakdown ({duration_label} Simulation Across Seeds)\n\n")
         seed_rows = [
             [
                 r["seed"],
@@ -655,26 +690,26 @@ async def main():
         f.write(tabulate(seed_rows, headers=["Seed", "Controller Mode", "Base (kWh)", "Ctrl (kWh)", "Savings (%)", "CO₂ Avoided (kg)", "Peak Red. (%)", "Base Comfort", "Ctrl Comfort", "Ctrl PMV"], tablefmt="github") + "\n\n")
 
         f.write("## 2. Matched Head-to-Head Comparison (Identical 5 Timesteps, Seed 42)\n\n")
-        f.write("To ensure a rigorous, matched evaluation without transient duration distortion, all three control approaches were executed from the identical initial state, weather sequence, and occupancy schedule (00:00 to 01:15 simulation time):\n\n")
+        f.write(f"The available control approaches share seeded thermal conditions for five timesteps starting at {slice_start}. Live LLM results are omitted when its configured model is unavailable.\n\n")
 
-        matched_headers = ["Metric", "Fixed Baseline", "Rule-Based Dynamic", "Live LLM (qwen2.5:1.5b)"]
+        matched_headers = ["Metric", "Fixed Baseline", "Rule-Based Dynamic", f"Live LLM ({settings.LLM_MODEL})"]
         rule_sav_str = f"{safe_pct(matched_base['total_energy_kwh'], matched_rule['total_energy_kwh']):+.1f}%"
         llm_sav_str = f"{safe_pct(matched_base['total_energy_kwh'], matched_llm['total_energy_kwh']):+.1f}%" if matched_llm else "N/A"
         matched_rows = [
             ["Total Energy Consumed", f"{matched_base['total_energy_kwh']:.2f} kWh", f"{matched_rule['total_energy_kwh']:.2f} kWh", f"{matched_llm['total_energy_kwh']:.2f} kWh" if matched_llm else "N/A"],
             ["Energy Savings vs Baseline", "Reference (0.0%)", rule_sav_str, llm_sav_str],
-            ["ASHRAE 55 Comfort (|PMV| ≤ 0.5)", f"{matched_base['comfort_adherence_pct']:.1f}%", f"{matched_rule['comfort_adherence_pct']:.1f}%", f"{matched_llm['comfort_adherence_pct']:.1f}%" if matched_llm else "N/A"],
+            ["PMV Comfort Target (|PMV| ≤ 0.5)", f"{matched_base['comfort_adherence_pct']:.1f}%", f"{matched_rule['comfort_adherence_pct']:.1f}%", f"{matched_llm['comfort_adherence_pct']:.1f}%" if matched_llm else "N/A"],
             ["Mean PMV (Comfort Index)", f"{matched_base['mean_pmv']:+.3f}", f"{matched_rule['mean_pmv']:+.3f}", f"{matched_llm['mean_pmv']:+.3f}" if matched_llm else "N/A"],
             ["Mean PPD (% Dissatisfied)", f"{matched_base['mean_ppd']:.1f}%", f"{matched_rule['mean_ppd']:.1f}%", f"{matched_llm['mean_ppd']:.1f}%" if matched_llm else "N/A"],
             ["Controller Fallback Count", "N/A", "0 (Algorithmic)", f"{matched_llm['fallback_calls']}/5" if matched_llm else "N/A"],
-            ["Average Decision Latency", f"{statistics.mean(matched_base['latencies'])*1000:.2f} ms", f"{statistics.mean(matched_rule['latencies'])*1000:.2f} ms", f"{statistics.mean(matched_llm['llm_times']):.2f} s" if matched_llm else "N/A"],
+            ["Average Decision Latency", f"{statistics.mean(matched_base['latencies'])*1000:.2f} ms", f"{statistics.mean(matched_rule['latencies'])*1000:.2f} ms", f"{statistics.mean(matched_llm['latencies']):.2f} s" if matched_llm else "N/A"],
             ["Actuator Setpoint Modifications", "0 (Static)", f"{matched_rule['setpoint_changes_count']} updates", f"{matched_llm['setpoint_changes_count']} updates" if matched_llm else "N/A"],
         ]
         f.write(tabulate(matched_rows, headers=matched_headers, tablefmt="github") + "\n\n")
-        f.write("> [!NOTE]\n> **Thermal Transient Explanation**: In the initial 5 timesteps (cold building startup at midnight), all three controllers (Baseline, Rule-Based, and Live LLM) show an identical **12.0%** comfort adherence because the envelope starts slightly cool (-0.68 PMV) before thermal equilibrium is reached. As the 96-step simulation advances through morning and occupied hours, comfort rises to **63.9%**.\n\n")
+        f.write(f"> [!NOTE]\n> **Scope**: This short comparison starts at {slice_start} and covers five timesteps. It cannot establish day-long LLM energy or comfort performance.\n\n")
 
         f.write("## 3. In-Process MCP Tool Function Latency (N=50 Repetitions)\n\n")
-        f.write("> [!NOTE]\n> **Transport Overhead Distinction**: These benchmarks measure the in-memory Python execution speed of the underlying tool logic. Real MCP clients communicating over stdio or SSE JSON-RPC transport will experience an additional ~1–5 ms serialization and IPC/HTTP round-trip overhead.\n\n")
+        f.write("> [!NOTE]\n> **Transport Scope**: These benchmarks measure in-process Python tool execution. Serialization, IPC, HTTP, and network latency are not measured.\n\n")
 
         mcp_table = [
             [r["name"], r["sample_count"], f"{r['median_ms']:.3f} ms", f"{r['mean_ms']:.3f} ms", f"{r['p95_ms']:.3f} ms", f"{r['min_ms']:.3f} ms", f"{r['max_ms']:.3f} ms", r["status"]]
@@ -685,13 +720,12 @@ async def main():
         f.write("## 4. Fault Tolerance & Actuation Resilience\n\n")
         f.write("Evaluation of controller behavior under injected physical, network, and model failure modes:\n\n")
         ft_table = [
-            ["LLM Network Disconnect", f"{ft_disconnect['failures']}/{ft_disconnect['steps']} Fallback Actions", "100% Graceful Fallback (Real port connection refusal)"],
-            ["LLM Request Timeout", f"{ft_timeout['failures']}/{ft_timeout['steps']} Fallback Actions", "100% Graceful Fallback (Real HTTP timeout aborted in 0.01 ms)"],
-            ["Malformed Model Response", f"{ft_corrupt['failures']}/{ft_corrupt['steps']} Fallback Actions", "100% Caught by BuildingAIAgent and routed to fallback"],
-            ["Fallback Actuator Actuation", "All 5 Zones Updated on Environment", "Passed (Actuators received and applied fallback setpoints)" if fallback_applied_passed else "Failed"],
+            ["LLM Network Disconnect", f"{ft_disconnect['failures']}/{ft_disconnect['steps']} Fallback Actions", "Fallback after real port connection refusal"],
+            ["LLM Request Timeout", f"{ft_timeout['failures']}/{ft_timeout['steps']} Fallback Actions", "Fallback after forced HTTP failure (timeout or connection error)"],
+            ["Malformed Model Response", f"{ft_corrupt['failures']}/{ft_corrupt['steps']} Fallback Actions", "Schema validation and fallback path exercised"],
+            ["Fallback Actuator Actuation", f"{len(fallback_decision.zone_setpoints)} zone requests sent", "Passed (Actuators received and applied fallback setpoints)" if fallback_applied_passed else "Failed"],
             ["Sensor Dropout (NaN / Disconnect)", "Anomalous reading flagged & imputed", "Passed (Comfort scores calculable without numerical error)" if sensor_fault_passed else "Failed"],
             ["Polar Vortex Freeze (-20°C ambient)", "Heating Floor Maintained", "Passed (Indoor T ≥ 16.0°C across all zones)" if polar_passed else "Failed"],
-            ["System Crash / Panic Count", "0 Crashes", "Healthy Uptime Maintained"],
         ]
         f.write(tabulate(ft_table, headers=["Fault Scenario", "Handler Action", "Verification Result"], tablefmt="github") + "\n\n")
 
@@ -700,30 +734,24 @@ async def main():
             ["Host CPU Utilization", f"{cpu_percent:.1f}%"],
             ["Process Memory (RSS RAM)", f"{ram_mb:.1f} MB"],
             ["Local Ollama Server", "Connected" if ollama_up else "Offline"],
-            ["Verified LLM Model", settings.LLM_MODEL],
-            ["Simulation Engine", "Python ISO 7730 Thermal Mass Model" if settings.SIMULATION_MODE else "EnergyPlus Real API"],
+            ["Verified LLM Model", settings.LLM_MODEL if ollama_client is not None else "Unavailable (not verified)"],
+            ["Simulation Engine", "Synthetic Python thermal model with PMV/PPD estimates (EnergyPlus is not run by this harness)"],
         ]
         f.write(tabulate(health_table, headers=["System Component", "Observed State"], tablefmt="github") + "\n\n")
 
         f.write("## 6. Methodology & Empirical Limitations\n\n")
         f.write("""- **Matched Evaluation**: Reference fixed baseline and controlled environments share identical building dimensions, thermal mass coefficients ($1.8\\times 10^7$ to $4.5\\times 10^7$ J/K), weather profiles, and occupant density.
 - **Emission Modeling**: CO₂ calculations use an un-clamped factor of 0.386 kg/kWh, preserving negative emissions penalties whenever a controller consumes more energy than the baseline.
-- **Comfort Standard**: Thermal comfort evaluates ASHRAE Standard 55 / ISO 7730 Predicted Mean Vote (PMV) neutral target ($-0.5 \\le \\text{PMV} \\le +0.5$) with 15-minute sampling across all zones.
-- **Extrapolation Bounds**: 24-hour evaluation results capture diurnal day-night heating and cooling cycles. Full annual building performance requires multi-season simulation runs across summer and winter weather files.\n\n""")
+- **Comfort Scope**: The PMV neutral target ($-0.5 \\le \\text{PMV} \\le +0.5$) is sampled across all zones, including unoccupied periods. This metric does not establish full ASHRAE 55 compliance.
+- **Extrapolation Bounds**: Results describe only the configured synthetic simulation period. Annual and physical-building performance require separate validation.\n\n""")
 
         f.write("## Visualization\n\n")
         f.write("![Energy Comparison](energy_comparison.png)\n")
 
-    if os.path.isdir(artifact_dir):
-        try:
-            shutil.copy(output_file, os.path.join(artifact_dir, "evaluation_report.md"))
-        except Exception:
-            pass
-
     print(f"\n[DONE] Evaluation complete!")
     print(f"  Report: {output_file}")
-    print(f"  Raw JSON: evaluation_results.json")
-    print(f"  Plot: energy_comparison.png\n")
+    print(f"  Raw JSON: {results_file}")
+    print(f"  Plot: {plot_file}\n")
 
 
 if __name__ == "__main__":

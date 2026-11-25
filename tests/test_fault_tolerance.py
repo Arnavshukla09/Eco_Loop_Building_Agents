@@ -161,6 +161,7 @@ async def test_actuator_slew_rate_limiting():
 async def test_ollama_corrupted_json_recovery():
     """Verify agent catches invalid/corrupted JSON from LLM and falls back safely with controller_source=fallback."""
     agent = BuildingAIAgent()
+    agent._available = True
     from unittest.mock import AsyncMock, patch
 
     env = SimulatedBuildingEnvironment(seed=505)

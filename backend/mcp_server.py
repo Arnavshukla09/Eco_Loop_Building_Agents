@@ -30,6 +30,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from fastmcp import FastMCP
+from backend.auth import mcp_authenticated, valid_api_key
 
 from config.settings import settings
 
@@ -68,7 +69,7 @@ def _verify_mcp_auth(api_key: Optional[str] = None) -> Optional[str]:
         return "Server security misconfiguration: API_KEY must be configured in production environment."
 
     if settings.API_KEY:
-        if not api_key or api_key != settings.API_KEY:
+        if not valid_api_key(api_key) and not mcp_authenticated.get():
             return "Forbidden: mutating MCP operations require a valid 'api_key'."
 
     return None
@@ -165,10 +166,8 @@ async def update_setpoint(
         success = False
 
     return {
-        "success":    success,
+        **controller.setpoint_result([zone], cooling_c, heating_c, success),
         "zone":       zone,
-        "cooling_c":  round(cooling_c, 1),
-        "heating_c":  round(heating_c, 1),
         "message":    f"Setpoint updated for {zone}." if success else "Controller not running.",
     }
 
@@ -201,13 +200,11 @@ async def update_all_setpoints(
     from backend.controller import controller
     if controller is not None:
         success = await controller.set_all_zone_setpoints(cooling_c, heating_c)
-        if success:
-            return {
-                "success":     True,
-                "zones_updated": settings.ZONES,
-                "cooling_c":   round(cooling_c, 1),
-                "heating_c":   round(heating_c, 1),
-            }
+        result = controller.setpoint_result(settings.ZONES, cooling_c, heating_c, success)
+        result["zones_updated"] = list(result["applied_setpoints"])
+        if not success:
+            result["error"] = "One or more zones rejected the requested setpoints."
+        return result
     return {"success": False, "error": "Controller not running."}
 
 

@@ -22,17 +22,24 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import timezone
 import logging
 import time
+import math
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Security, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response
+import csv
+import io
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 
 from backend.controller import controller
+from backend.auth import browser_origin_allowed, mcp_authenticated, valid_api_key
+from backend.energyplus_runner import SimulatedBuildingEnvironment
 from backend.dashboard_api import broadcast_loop, websocket_endpoint
 from backend.database import close_db, init_db
 from backend.mcp_server import mcp
@@ -62,7 +69,7 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
         )
 
     if settings.API_KEY:
-        if not credentials or credentials.credentials != settings.API_KEY:
+        if not credentials or not valid_api_key(credentials.credentials):
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden: Mutating operations require a valid 'Authorization: Bearer <API_KEY>' header.",
@@ -176,15 +183,12 @@ class MCPAuthMiddleware:
 
             if settings.API_KEY:
                 headers = dict(scope.get("headers", []))
-                auth_header = headers.get(b"authorization", b"").decode("utf-8")
-                query_string = scope.get("query_string", b"").decode("utf-8")
+                auth_header = headers.get(b"authorization", b"").decode("latin-1")
                 authorized = False
-                if auth_header.startswith("Bearer "):
+                if auth_header.lower().startswith("bearer "):
                     token = auth_header[7:].strip()
-                    if token == settings.API_KEY:
+                    if valid_api_key(token):
                         authorized = True
-                if not authorized and f"api_key={settings.API_KEY}" in query_string:
-                    authorized = True
 
                 if not authorized:
                     response = JSONResponse(
@@ -194,7 +198,35 @@ class MCPAuthMiddleware:
                     await response(scope, receive, send)
                     return
 
+        token = mcp_authenticated.set(scope["type"] == "http" and bool(settings.API_KEY))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            mcp_authenticated.reset(token)
+
+
+class BrowserOriginMiddleware:
+    """Reject untrusted browser mutations and WebSocket handshakes before dispatch."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        kind = scope["type"]
+        if kind in ("http", "websocket"):
+            headers = dict(scope.get("headers", []))
+            origin = headers.get(b"origin")
+            protected = kind == "websocket" or scope.get("method") not in ("GET", "HEAD", "OPTIONS")
+            if protected and not browser_origin_allowed(origin.decode("latin-1") if origin is not None else None, scope):
+                if kind == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await JSONResponse(status_code=403, content={"detail": "Browser origin is not allowed to control this service."})(scope, receive, send)
+                return
         await self.app(scope, receive, send)
+
+
+app.add_middleware(BrowserOriginMiddleware)
 
 
 # Mount MCP ASGI sub-application at /mcp
@@ -225,17 +257,16 @@ async def get_history(limit: int = 100) -> JSONResponse:
     mem_entries = state_store.get_history(limit=limit)
     if len(mem_entries) < limit:
         try:
-            db_entries = await repository.get_history(limit=limit)
+            run_id = controller._current_run_id or await repository.get_active_run_id()
+            db_entries = await repository.get_history(run_id=run_id, limit=limit) if run_id else []
             if db_entries:
                 # Merge and deduplicate by simulation timestamp
-                seen = set()
-                merged = []
+                merged = {}
                 for e in db_entries + mem_entries:
-                    key = e.sim_time.isoformat()
-                    if key not in seen:
-                        seen.add(key)
-                        merged.append(e)
-                entries = merged[-limit:]
+                    sim_time = e.sim_time
+                    key = sim_time.replace(tzinfo=timezone.utc).isoformat() if sim_time.tzinfo is None else sim_time.astimezone(timezone.utc).isoformat()
+                    merged[key] = e
+                entries = [merged[key] for key in sorted(merged)][-limit:]
             else:
                 entries = mem_entries
         except Exception as exc:
@@ -258,6 +289,28 @@ async def list_simulation_runs(limit: int = 20) -> JSONResponse:
     return JSONResponse(content={"runs": runs})
 
 
+@app.get("/api/simulation/runs/{run_id}/history")
+async def run_history(run_id: str, limit: int = 500) -> dict:
+    entries = await repository.get_history(run_id=run_id, limit=max(1, min(limit, 10000)))
+    return {"run_id": run_id, "entries": [e.model_dump(mode="json") for e in entries]}
+
+
+@app.get("/api/simulation/runs/{run_id}/decisions")
+async def run_decisions(run_id: str, limit: int = 100) -> dict:
+    return {"run_id": run_id, "decisions": await repository.get_decisions(run_id, max(1, min(limit, 1000)))}
+
+
+@app.get("/api/simulation/runs/{run_id}/export")
+async def export_run(run_id: str) -> Response:
+    entries = await repository.get_history(run_id=run_id, limit=10000)
+    stream = io.StringIO()
+    columns = list(__import__("backend.models", fromlist=["HistoryEntry"]).HistoryEntry.model_fields)
+    writer = csv.DictWriter(stream, fieldnames=columns)
+    writer.writeheader()
+    writer.writerows(e.model_dump(mode="json") for e in entries)
+    return Response(stream.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="simulation-history.csv"'})
+
+
 @app.get("/api/health")
 async def health_check() -> HealthStatus:
     """
@@ -270,14 +323,17 @@ async def health_check() -> HealthStatus:
     mcp_running = state_store.is_mcp_running()
     readiness = obs is not None and sim_running
 
+    decision = state_store.get_decision()
+    provider = controller.provider.name
+    deterministic = provider in ("rule_based", "scheduled", "forecast")
+    controller_mode = decision.controller_source if decision is not None else (provider if deterministic else "rule_based")
+
     if not sim_running:
         overall_status = "degraded" if obs is not None else "starting"
-    elif not llm_avail:
+    elif controller_mode == "fallback" or (not deterministic and not llm_avail):
         overall_status = "degraded"  # autonomous control active in rule-based mode
     else:
         overall_status = "ok"
-
-    controller_mode = "llm" if llm_avail else "rule_based"
 
     return HealthStatus(
         status=overall_status,
@@ -288,7 +344,7 @@ async def health_check() -> HealthStatus:
         mcp_running=mcp_running,
         controller_mode=controller_mode,
         uptime_seconds=round(time.monotonic() - _app_start_time, 1),
-        simulation_mode=settings.SIMULATION_MODE,
+        simulation_mode=isinstance(controller.env, SimulatedBuildingEnvironment) if controller.env else settings.SIMULATION_MODE,
         model=settings.LLM_MODEL,
         timestep=obs.timestep if obs else 0,
     )
@@ -304,24 +360,31 @@ async def manual_setpoint(cmd: SetpointCommand) -> JSONResponse:
     cooling_c = cmd.cooling
     heating_c = cmd.heating
 
-    if cmd.zone is not None:
-        ok = await controller.set_zone_setpoint(cmd.zone, cooling_c, heating_c)
-        message = f"Setpoint applied to {cmd.zone}." if ok else "Failed to apply setpoint."
-        zone_applied = cmd.zone
-    else:
-        ok = await controller.set_all_zone_setpoints(cooling_c, heating_c)
-        message = "Setpoints applied to all zones." if ok else "Failed to apply setpoints."
-        zone_applied = "ALL"
+    result = await controller.manual_override(cmd.zone, cooling_c, heating_c, cmd.duration_minutes)
+    message = "Manual hold active for acknowledged setpoints." if result["success"] else "One or more zones rejected the request."
+    state_store.update_control(controller.control_status())
 
     return JSONResponse(
         content={
-            "success": ok,
-            "zone": zone_applied,
-            "cooling_c": round(cooling_c, 1),
-            "heating_c": round(heating_c, 1),
+            **result,
+            "zone": cmd.zone or "ALL",
             "message": message,
         }
     )
+
+
+@app.get("/api/control")
+async def get_control() -> dict:
+    return controller.control_status()
+
+
+@app.post("/api/override/release", dependencies=[Depends(verify_api_key)])
+async def release_override(zone: str | None = None) -> dict:
+    if zone is not None and zone not in settings.ZONES:
+        raise HTTPException(status_code=422, detail="Unknown zone.")
+    await controller.release_override(zone)
+    state_store.update_control(controller.control_status())
+    return {"success": True, **controller.control_status()}
 
 
 @app.post("/api/simulation/reset", dependencies=[Depends(verify_api_key)])
@@ -346,7 +409,7 @@ async def set_speed(speedup: float) -> JSONResponse:
     Adjust simulation speedup factor (demo/local control).
     1.0 = real time, 60.0 = 1 simulated minute per second, max 3600.0.
     """
-    if speedup < 1.0 or speedup > 3600.0:
+    if not math.isfinite(speedup) or speedup < 1.0 or speedup > 3600.0:
         raise HTTPException(
             status_code=422,
             detail="Speedup factor must be between 1.0 and 3600.0.",

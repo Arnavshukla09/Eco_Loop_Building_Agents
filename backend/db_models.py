@@ -54,6 +54,9 @@ class HistoricalReadingModel(Base):
     wall_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     avg_temp = Column(Float, nullable=False)
     hvac_power_kw = Column(Float, nullable=False)
+    baseline_power_kw = Column(Float, nullable=True)
+    total_cost = Column(Float, nullable=True)
+    fan_power_kw = Column(Float, nullable=True)
     total_energy_kwh = Column(Float, nullable=False)
     comfort_score = Column(Float, nullable=False)
     energy_savings_pct = Column(Float, nullable=False)
@@ -81,5 +84,6 @@ class DecisionRecordModel(Base):
     reasoning = Column(Text, nullable=False)
     actuation_status = Column(String(32), default="applied", nullable=False)
     zone_setpoints_json = Column(Text, nullable=False)
+    requested_setpoints_json = Column(Text, nullable=True)
 
     run = relationship("SimulationRunModel", back_populates="decisions")

@@ -69,6 +69,14 @@ class RuleBasedProvider(BaseDecisionProvider):
         obs: BuildingObservation,
         history: Optional[List[HistoryEntry]] = None,
     ) -> AgentDecision:
+        from backend.llm_agent import _rule_based_decision
+        return _rule_based_decision(obs)
+
+    async def _legacy_decide(
+        self,
+        obs: BuildingObservation,
+        history: Optional[List[HistoryEntry]] = None,
+    ) -> AgentDecision:
         setpoints: Dict[str, ZoneSetpoint] = {}
         outdoor = obs.outdoor_temp
         occupancy = obs.occupancy
@@ -117,6 +125,51 @@ class RuleBasedProvider(BaseDecisionProvider):
         )
 
 
+class ScheduledProvider(BaseDecisionProvider):
+    """Conventional occupied/unoccupied schedule used as a competitive baseline."""
+    @property
+    def name(self):
+        return "scheduled"
+
+    async def check_availability(self, force=False):
+        return True
+
+    async def decide(self, obs, history=None):
+        occupied = obs.occupancy >= 0.2
+        cool, heat = (24.0, 20.5) if occupied else (28.0, 17.0)
+        return AgentDecision(controller_source=self.name, zone_setpoints={z: ZoneSetpoint(cooling=cool, heating=heat) for z in obs.zones}, fan_speed="medium" if occupied else "low", energy_mode="balanced" if occupied else "eco", reasoning="Scheduled occupied comfort band and unoccupied setback.", confidence=1.0)
+
+
+class ForecastProvider(ScheduledProvider):
+    """Explicit heuristic supervisor using expected occupancy, weather, and tariff."""
+    @property
+    def name(self):
+        return "forecast"
+
+    async def decide(self, obs, history=None):
+        decision = await super().decide(obs, history)
+        soon = obs.forecast[:2]
+        preoccupancy = obs.occupancy < 0.2 and any(p["occupancy"] >= 0.2 for p in soon)
+        expensive = obs.electricity_rate >= settings.TARIFF_PEAK and settings.TARIFF_PEAK > settings.TARIFF_OFFPEAK
+        hot_soon = any(p["outdoor_temp"] > 25 and p["electricity_rate"] > obs.electricity_rate for p in soon)
+        for name, sp in decision.zone_setpoints.items():
+            if preoccupancy:
+                sp.cooling, sp.heating = 24.0, 20.5
+            if obs.occupancy >= 0.2 and expensive:
+                sp.cooling += 0.5
+                sp.heating -= 0.5
+            elif obs.occupancy >= 0.2 and hot_soon:
+                sp.cooling -= 0.5
+            pmv = obs.zones[name].pmv_score
+            if obs.occupancy >= 0.2 and pmv > 0.5:
+                sp.cooling = max(22.0, sp.cooling - 0.5)
+            elif obs.occupancy >= 0.2 and pmv < -0.5:
+                sp.heating = min(22.0, sp.heating + 0.5)
+        decision.controller_source = self.name
+        decision.reasoning = f"Forecast heuristic: preoccupancy={preoccupancy}, peak tariff={expensive}, hot period ahead={hot_soon}. Occupied PMV corrections take priority."
+        return decision
+
+
 class OllamaProvider(BaseDecisionProvider):
     """Local LLM provider calling Ollama with structured schema outputs and verified model check."""
 
@@ -143,7 +196,7 @@ class OllamaProvider(BaseDecisionProvider):
             client = ollama.AsyncClient(host=self.host)
             models = await asyncio.wait_for(client.list(), timeout=3.0)
             avail = [m.model for m in models.models] if hasattr(models, "models") else []
-            has_model = any(self.model == m or self.model in m or m.startswith(self.model.split(":")[0]) for m in avail)
+            has_model = (self.model if ":" in self.model else self.model + ":latest") in avail
             self._available = has_model
             return has_model
         except Exception:
@@ -155,7 +208,7 @@ class OllamaProvider(BaseDecisionProvider):
         obs: BuildingObservation,
         history: Optional[List[HistoryEntry]] = None,
     ) -> AgentDecision:
-        if not self._available:
+        if not self._available and not await self.check_availability():
             raise RuntimeError(f"Ollama provider '{self.model}' is currently unavailable.")
 
         import ollama
@@ -180,6 +233,8 @@ class OllamaProvider(BaseDecisionProvider):
                 for name, z in obs.zones.items()
             },
             "recent_readings_count": len(recent_hist),
+            "forecast": obs.forecast,
+            "electricity_rate": obs.electricity_rate,
         }
 
         messages = [
