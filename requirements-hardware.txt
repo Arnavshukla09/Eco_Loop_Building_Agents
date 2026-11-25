@@ -1,0 +1,3 @@
+-r requirements.lock
+pymodbus>=3.11,<4
+bacpypes3>=0.0.106,<1
